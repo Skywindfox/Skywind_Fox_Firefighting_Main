@@ -251,7 +251,7 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 
 ## 4. 协作上的硬约束
 
-- **远程用 SSH，不要用 HTTPS。** `git@github.com:Skywindfox/DefFireWork.git` ——
+- **远程用 SSH，不要用 HTTPS。** `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` ——
   `github.com` 的 HTTPS 时通时断，推一半失败很难查。
 - **开发机跑不了 armhf 产物**（架构不同 + 需要板上的 libX11），必须 scp 到板上跑。
 - **板上不编译**：一切从开发机交叉编译后推过去，产物统一放板上 `~/Desktop`。
