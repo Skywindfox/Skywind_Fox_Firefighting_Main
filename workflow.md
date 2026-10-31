@@ -21,11 +21,14 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | Linux 交叉编译（`build-armhf.sh`） | ✅ 实测通过 | 0 警告；同源同镜像重建产物 sha256 逐字节一致（可复现） |
-| Windows 交叉编译（`build-armhf.ps1`） | ✅ 已跑通 | FBI-0537 在 Windows 上实跑（2026-09-19，PR #8）：`-Wall -Wextra` 零警告，产物 407948 / 9788 字节。**待办 #2 达成**（此前只改过、从没执行过） |
-| 板上实测（LVGL 版） | ❌ **还没做** | NOTES.md §10、WARNING A-1；逐项判据见 runbook §3–§4 |
-| 原生 GUI（开发机预览） | ✅ 四页正常 | 首页 / LED 调试页 / 蜂鸣器调试页 / 外部蜂鸣器页：切页、按钮派发、退出路径都实测过 |
+| Windows 交叉编译（`build-armhf.ps1`） | ✅ 已跑通 | FBI-0537 在 Windows 上实跑（2026-09-19，PR #8）：`-Wall -Wextra` 零警告，产物约 0.4 MB / 10 KB（具体字节以构建产物为准）。**原待办 #2 已达成**（此前只改过、从没执行过） |
+| 板上实测（LVGL 版） | ✅ 已上板验证通过 | 2026-10-18 项目成员确认；判据见 runbook §3–§4，具体日志/证据建议回填 §5 |
+| 原生 GUI（开发机预览） | ✅ 六类页面正常 | 首页（12 个信息源）/ 设置 / 信息源 / LED / 蜂鸣器 / 外部蜂鸣器：切页、按钮派发、退出路径都实测过；JSON 文件热更新也实测过 |
 | 骨架重构（四阶段 + 单循环） | ✅ 原生实测 | 0 警告；主循环 910 次/秒（与重构前一致）；点【退出】→ `gui_teardown()` → 进程干净退出；`--help` 不崩。见 §2.1 |
-| GPIO 输入（libgpiod） | ⚠ 只有骨架 | 依赖链已配齐并交叉编译通过；**没有任何调用点**，板端也没验过（不知道传感器接在哪个 gpiochip / 哪条线上） |
+| GPIO 输入（libgpiod） | ⚠ 只有骨架 | 依赖链已配齐并交叉编译通过；**没有任何调用点**，板端也没验过（不知道传感器接在哪个 gpiochip / 哪条线上）。后续做成可扩展注册表，见 §2.3 |
+| JSON 解析（cJSON） | ✅ 原生构建 + 单测 | `{"data":1,"smoke":1}` 解析、错误处理已通过 `test_json_status`；字面量/文件来源已在控制台验证；板上 UI 与文件热更新待验证。见 §2.5 |
+| 全屏 | ✅ 方案已定（交给 DE） | 不自己实现；按 EWMH 向 LXDE/Openbox 提交 `_NET_WM_STATE_FULLSCREEN` 请求（或配窗口规则），见 §2.2 |
+| 测试策略 | ✅ 手工验收 | 硬件 / GUI / 触摸以 VERIFY-RUNBOOK 为准；`ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame`） |
 
 ---
 
@@ -63,11 +66,15 @@ main.cpp（收命令行参数 + 定义程序级全局量 g_quit / g_argc / g_arg
 - 注意：`g_quit` 等符号由 `main.cpp` 定义，而 `firecontrol` 静态库里引用它们 ——
   链接没问题（每个产物各编一份 `main.cpp`），但**别在库里新开对 `start.cpp` 的依赖**。
 
-### 2.2 真全屏（等实测再决定）
+### 2.2 真全屏（2026-10-18：交给 DE，不自己实现）
 
-板上有 Openbox，窗口大概率被加装饰（开发机上实测：请求 1024x600，实际报 1074x687）。
-要真铺满得在建窗口后发 `_NET_WM_STATE_FULLSCREEN`（走 EWMH）——**现在没实现**。
-先按 runbook §4.3 上板确认有没有被加标题栏，再决定写不写。详见 WARNING C-7。
+板上与开发机都是 LXDE/X11（板上 WM 为 Openbox），窗口会被接管、加装饰。
+**决定：不再自己实现真全屏** —— 全屏交给 DE：应用侧按 EWMH 向 WM 发送
+`_NET_WM_STATE_FULLSCREEN` 请求（或在 LXDE/Openbox 里配窗口规则），是否铺满由 WM
+决定；不在 GUI 里手工算坐标、也不造无边框窗口。
+
+**当前状态**：方案已定，代码/DE 侧还没落地这个请求；下次上板按 runbook §4.3
+确认一次"发请求后是否铺满"即可。详见 WARNING C-7。
 
 ### 2.3 传感器模块（0%，但有骨架）
 
@@ -112,9 +119,14 @@ GPIOD / GPIOE / GPIOG: 全部被占用
 板端还要有运行时库：`sudo apt install libgpiod2`。**不装整个界面起不来**（不是局部功能失效），
 因为交叉产物链着 `libgpiod.so.2`；`verify-on-board.sh` 会把缺失的库列出来。
 
+**后续方向（2026-10-18）：做成可扩展的传感器注册表。** 现在不知道最终会接几个、什么型号的
+探测器，所以 `kGpioInputs` 这个静态数组**不是最终设计**。后面改成配置文件或运行时注册：
+一路探测器一条记录（名称 / chip_label / line / consumer / 极性 / 去抖等），支持任意 N 路；
+新增探测器不改业务代码，最好也不用重新编译。当前先保持空表 —— 不预置猜出来的接线。
+
 ### 2.4 GPIO **输出**（外部无源蜂鸣器，2026-09-19 随 PR #8 加的）
 
-板上 PA6（= **GPIOA line 6**，实测空闲）接了一个**无源**蜂鸣器模块，首页有入口、
+板上 PA6（= **GPIOA line 6**，实测空闲）接了一个**无源**蜂鸣器模块，设置页有入口、
 独立调试页是 开 / 关 / 返回（**没有"心跳"** —— 它不归内核 leds-gpio 管，没有 `trigger` 文件）。
 
 写 GPIO 有两条路，**别用错**：
@@ -154,7 +166,7 @@ FIRECONTROL_BUZZER_HZ=3000 DISPLAY=:0 ./deffire-gui-dev     # 100..8000，超范
 **一个副作用（知道就好，暂时不用管）**：`gpio_read_value()` 与 `write_File()` 在同一个
 翻译单元（`usetools.cpp`），链接器为 `write_File` 拉进这个 `.o` 时会把 gpiod 引用一起带上
 —— 于是**连不读 GPIO 的控制台程序 `deffire-dev` 也依赖 `libgpiod.so.2`**
-（产物 5,648 → 9,768 字节）。想去掉这个连带依赖，把 `gpio_read_value()` 挪到自己的
+（产物从约 5.6 KB 变成约 10 KB，具体以构建产物为准）。想去掉这个连带依赖，把 `gpio_read_value()` 挪到自己的
 `.cpp`（如 `src/library/gpio.cpp`）并登记进 `CMakeLists.txt` 即可，那样只有真正调用它的目标才链
 libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI 需要），收益只是让控制台
 程序少一个依赖。
@@ -162,11 +174,43 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 `~/下载/` 里那份官方 `main.c` 用的是"综合例程扩展板"的 GPIO 配置（3 个 LED、蜂鸣器走
 `EV_SND`），**和手上这块底板不是一回事** —— 可以看它怎么调 libgpiod，但引脚编号别照抄。
 
+### 2.5 JSON 状态（2026-10-31，最基础）
+
+引入了 **cJSON 1.7.18**（`third_party/cjson`，MIT，随仓库提交，板上不需要另装
+`libcjson-dev`），解析传感器帧里的最小状态对象：
+
+```text
+{"start":1} ...数据... {"end":1}
+{"data":1,"smoke":1}
+```
+
+- `src/library/json_frame.cpp` 负责流式切帧：标记精确匹配、可处理半包、
+  不完整帧丢弃、新 `start` 出现时从新帧重开、单帧上限 8 KB；
+  `src/library/json_status.cpp` 只解析完整帧里的 payload。
+- `json_status.cpp` 只认 payload 根对象里的 `data` / `smoke`，且必须是数字；
+  其它字段忽略。根节点不是对象、缺字段、类型不对、语法错误都会返回
+  `valid=false` 和一条静态 `error`。
+- 数据来源优先级：`FIRECONTROL_JSON` 字面量 > `FIRECONTROL_JSON_FILE` 文件 >
+  当前目录 `firecontrol.json`（存在才用）> 内置示例帧。
+- 文件来源每 200 ms 检查一次：内容没变不重复喂；追加只喂新增后缀；重写则重置解析器；
+  之前在帧模式但重写内容没有 `start` 时保留上一帧，按不完整处理。
+- 每个信息源有独立的 `JsonFrameParser` / `JsonStatus`；接口页「收到的报文」只显示
+  当前信息源的完整帧，不再共享。串口读取线程接上后调
+  `json_source_feed(index, data, len)`，index=0..11；断线重连调 `json_source_reset(index)`。
+- 没接串口时的测试来源：信息源 1 用 `FIRECONTROL_JSON` / `FIRECONTROL_JSON_FILE` /
+  `./firecontrol.json` / 内置帧；信息源 2..12 用可选的 `FIRECONTROL_JSON_FILE_<N>`。
+- 测试：`tests/test_json_status.cpp` + `tests/test_json_frame.cpp`；原生 `ctest` 3/3。
+- **还没接**串口/网络/真实传感器，也没有根据 `smoke` 做报警判定 —— 这一步只是把
+  "帧进得来、完整帧看得见"打通。
+- cJSON 静态编入产物：板上**不需要**装 `libcjson`/`libcjson-dev`，也不需要重建
+  armhf 工具链镜像；正常 `./build.sh gui-armhf` 后把 `build-armhf/deffire-gui-dev`
+  拷到板上即可（`Dockerfile.build-armhf` 已经 `COPY third_party/`）。
+
 ---
 
 ## 3. 界面的约定（改 `src/appgui/gui.cpp` 之前先读）
 
-界面是**单屏 + 分页底栏**：顶栏（品牌 / 状态灯 / 退出）三页完全一致，切页只重建底栏按钮。
+界面是**单屏 + 分页底栏**：顶栏（品牌 / 状态灯 / 设置 / 退出）所有页完全一致，切页只重建底栏按钮。
 
 1. **`Action::Nothing` 必须留在枚举第一位。** `ButtonSpec` 是聚合类型，表里漏写 `action`
    字段时它会被值初始化为 `0`；第一位是 `Nothing` 就退化成"占位"（点了没反应），
@@ -174,21 +218,34 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 2. **`onAction()` 的 `switch` 不写 `default`。** 往 `Action` 加成员忘了加 `case` 时，
    `-Wswitch` 会在编译期报出来。别为了消警告去加 `default`（要消 `-Wformat-overflow`
    就给结果变量一个非空初值）。
-3. **加页面 / 加按钮只改表**：`kHomeButtons` / `kLedButtons` / `kBuzzerButtons` + `kPages`。
+3. **加页面 / 加按钮只改表**：`kHomeButtons`（12 个信息源）/ `kSettingsButtons`（本地测试）/
+   `kSensorButtons`（覆盖层背后不可见的占位底栏）/ `kLedButtons` / `kBuzzerButtons` / `kOutBuzzerButtons` + `kPages`。
    数组长度用 `countOf()` 取，**不要手写数字** —— 手写的 `kNumButtons` 和表对不上，
    已经坏过一次（越界初始化）。
-   **"每行放几个"是每页自己的参数**（`PageSpec::columns`，首页 3 列、调试页 4 列），
-   不再是全局常量；行数由 `rowsOf(count, columns)` 算。末行不满时 `buildPageButtons()`
-   会补**透明占位**，让各行按钮等宽（不补的话 `flex_grow` 会把末行少量按钮撑成半屏宽）。
-   `columns` 必须 ≥ 1（有 `static_assert` 挡住除零）。
+   **"每行放几个"是每页自己的参数**（`PageSpec::columns`，首页 6 列、设置/调试页 4 列、
+   信息源页 1 列），不再是全局常量；行数由 `rowsOf(count, columns)` 算。末行不满时
+   `buildPageButtons()` 会补**透明占位**，让各行按钮等宽（不补的话 `flex_grow` 会把
+   末行少量按钮撑成半屏宽）。`columns` 必须 ≥ 1（有 `static_assert` 挡住除零）。
+   只有一个按钮的页（`Page::Sensor` 背后不可见的占位底栏）走 `single` 分支：行居中、
+   按钮固定 25% 宽；接口页真正的返回入口是覆盖层顶栏的【首页】。
 4. **`Page` 枚举的顺序必须与 `kPages` 一致**（有 `static_assert` 兜着）。
+   `Page::Sensor` 是**一类页**，具体编号在 `g_sensor_index`；页名由 `pageName()` 动态生成。
 5. **切页只置 `g_page_dirty`，重建在主循环里做。** 不要在事件回调里删掉正在派发的那个
-   按钮所在的底栏。
+   按钮所在的底栏；信息源页的数据面板也在同一个 dirty 分支里显隐。
 6. **控制台那行 `点击【x】坐标 (x,y) → 结果` 的格式不要改。** 板上核对触摸命中、
    记录硬件响应全靠它（runbook §4.2 的验收表按这个格式写的）。
 7. `kText = "halloworld"` 是**有意保留**的（WARNING A-3）。内容区那行小字显示"页名 ·
-   上一步结果"，也别删 —— 板上不接控制台时它是唯一的操作反馈。
-8. `q` / `Esc` 在每一页都是退出程序（板子是触摸屏，键盘只给开发机用）。
+   上一步结果"，也别删 —— 板上不接控制台时它是唯一的操作反馈。下面那行
+   `JSON  data = ...    smoke = ...` 是 `json_status` 的解析结果，同样保留
+   （失败时显示"未识别"）。
+8. **信息源页是独立全屏覆盖层**：`g_sensor_page` 只在 `Page::Sensor` 显示，盖住普通页的
+   顶栏/底栏。布局是「顶栏(品牌/首页/退出) + 左侧 12 个信息源按钮 + 中间接收/模块状态
+   卡片 + 右侧信息源设置」。左侧切换模块；右侧 GPIO/线号下拉 + 占位 + 应用设置；
+   中间五行是烟雾/火焰/温度/蜂鸣器/LED，下面是模块状态、收到的完整报文、预留。
+   0=正常/1=异常由传感器模块定义，app 不做极性换算；温度/蜂鸣器/LED 规则未定前显示
+   占位符。12 组默认 GPIO 映射集中在 `kDefaultSensorConfig[12]`，未提供前保持未配置。
+   覆盖层使用 `kSensorBg` 等深蓝黑 + 细灰线 + 少量琥珀强调，不套用普通页的深色工业风。
+9. `q` / `Esc` 在每一页都是退出程序（板子是触摸屏，键盘只给开发机用）。
 
 ---
 
@@ -198,6 +255,9 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
   `github.com` 的 HTTPS 时通时断，推一半失败很难查。
 - **开发机跑不了 armhf 产物**（架构不同 + 需要板上的 libX11），必须 scp 到板上跑。
 - **板上不编译**：一切从开发机交叉编译后推过去，产物统一放板上 `~/Desktop`。
+- **测试以手工验收为主**：硬件 / GUI / 触摸走 [VERIFY-RUNBOOK.md](VERIFY-RUNBOOK.md) 的逐项判据；
+  `ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame`）。不追求把硬件行为 mock 成自动化测试 ——
+  那种测试证明不了板上的事。
 - **`~/下载/` 里的正点原子资料别照抄**：`main.c` 是"综合例程扩展板"的配置（3 个 LED、
   蜂鸣器走 `EV_SND`），**不是手上这块底板**（1 个 LED + 1 个蜂鸣器，都在
   `/sys/class/leds/` 下）；那份 PDF 讲的是出厂 Buildroot 系统，指令不能直接搬到 Debian。

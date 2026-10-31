@@ -9,6 +9,7 @@
 
 #include "greeting.h"
 #include "hardware_path.h"
+#include "json_status.h"
 #include "usetools.h"
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,11 @@ int cpp_start()
 int device_init()
 {
     std::printf("%s\n", firecontrol::greeting().c_str());
+
+    // 最基础的 JSON 状态: 目前解析 {"data":1,"smoke":1} 这种对象。
+    // 来源优先级见 json_status.h (环境变量字面量 > 文件 > 内置示例)。
+    // 解析失败不阻断启动: status() 会把错误当成一种状态显示出来。
+    firecontrol::json_status_init();
 
     // TODO: 打开传感器 / 读配置文件 / 初始化数据结构。
 
@@ -199,6 +205,41 @@ int status()
         return 0;  // 还没到下一次采集
     }
     last_run_us = now;
+
+    // JSON 状态: 来源是文件时重新读一次; 字面量/内置示例不会变。
+    // 失败只更新状态, 不让整个采集流程失败。
+    firecontrol::json_status_refresh();
+
+    // 每个信息源一路独立状态; 哪一路变了才打印 (revision 由 json_status.cpp 维护)。
+    // 串口接上后, 各路会由 json_source_feed() 更新; 现在文件来源也走同一套。
+    static unsigned last_json_revision[firecontrol::kInfoSourceCount] = {};
+    for (int i = 0; i < firecontrol::kInfoSourceCount; i++) {
+        const firecontrol::JsonStatus json = firecontrol::json_status_for(i);
+        if (json.revision == last_json_revision[i]) {
+            continue;
+        }
+        last_json_revision[i] = json.revision;
+
+        // 还没有完整帧、也没有错误: 这一路还没数据, 不刷屏。
+        if (!json.has_frame && json.error == nullptr) {
+            continue;
+        }
+
+        if (i == 0) {
+            std::printf("--- JSON 状态 ---\n");
+        } else {
+            std::printf("--- 信息源 %d ---\n", i + 1);
+        }
+        if (json.has_frame) {
+            std::printf("  完整报文: %s\n", json.frame.c_str());
+        }
+        if (json.valid) {
+            std::printf("  data=%d  smoke=%d\n", json.data, json.smoke);
+        } else {
+            std::printf("  未识别: %s\n", json.error != nullptr ? json.error : "未知错误");
+        }
+        std::fflush(stdout);
+    }
 
     // 先采样, 再决定打不打印。
     const int filled = countFilledInputs();

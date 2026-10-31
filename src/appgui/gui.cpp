@@ -27,15 +27,18 @@
 //
 // 编译: 见 CMakeLists.txt, 目标 deffire-gui-dev
 // 运行:
-//     ./deffire-gui-dev                 全屏 —— 板上用这个 (按屏幕实际尺寸铺满)
+//     ./deffire-gui-dev                 按屏幕尺寸建窗口 —— 板上用这个 (是否铺满由 WM 决定)
 //     ./deffire-gui-dev --windowed      1024x600 窗口 —— 开发机预览用
 //     ./deffire-gui-dev --font=<文件>   指定字体文件 (默认按候选表自动找)
 //
 // 界面结构 (分页):
-//     首页            : 只放"进入调试页"的入口, 保持干净 (6 个硬件按钮不在这里)
+//     首页            : 12 个信息源 (传感器模块) 的入口, 2 行 × 6 列
+//     信息源 N 页     : 内容区"数据项"面板 (当前为空状态) + 居中【返回】
+//     设置页          : LED / 蜂鸣器 / 外部无源蜂鸣器调试入口 + 返回
 //     LED 调试页      : LED 开 / LED 关 / LED 心跳 / 返回
 //     蜂鸣器调试页    : 蜂鸣器开 / 蜂鸣器关 / 蜂鸣器心跳 / 返回
-//   顶栏 (品牌 / 状态灯 / 退出) 三页完全一致; 切页**只重建底栏按钮** (见 g_page_dirty)。
+//   顶栏 (品牌 / 状态灯 / 设置 / 退出) 所有页一致; 切页**只重建底栏按钮**
+//   (见 g_page_dirty), 信息源页的数据面板在同一个 dirty 分支里显隐。
 //   q / Esc 在每一页都是"退出程序", 不随页面变化 —— 板子上是触摸屏, 键盘只是开发机用。
 
 #include <lvgl.h>
@@ -52,6 +55,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "json_status.h"
 #include "start.h"  // led_on / led_off (板载 sys-led)
 
 namespace {
@@ -59,9 +63,52 @@ namespace {
 constexpr const char *kTitle = "FireControlApp";
 constexpr const char *kText = "halloworld";
 
-// 板上屏幕尺寸。仅用于窗口模式的默认值; 全屏时按实际屏幕尺寸。
+// 板上屏幕尺寸。仅用于窗口模式的默认值; 无参数时按实际屏幕尺寸建窗口。
 constexpr int kBoardWidth = 1024;
 constexpr int kBoardHeight = 600;
+
+// 首页预留的信息源 (传感器模块) 数量。具体模块/数据项还没定, 所以只预留格子,
+// 不预置任何传感器名字或数值 —— 点进去显示"尚未配置数据项"。
+constexpr int kSensorCount = 12;
+static_assert(kSensorCount == firecontrol::kInfoSourceCount,
+              "UI 信息源数量必须与 json_status 的 kInfoSourceCount 一致");
+
+// GPIO 控制器: 板上 gpiodetect 的 label 是 GPIOA..GPIOI。
+// 线数来自 2026-09-19 板上 gpioinfo 实测: GPIOH 15 条, GPIOI 8 条, 其余 16 条。
+// GPIOE 没有在当时的快照里单独列出, 按 16 条预留; 真正接线前以 gpiodetect/gpioinfo 为准。
+constexpr const char *kGpioPorts[] = {
+    "GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE",
+    "GPIOF", "GPIOG", "GPIOH", "GPIOI",
+};
+constexpr int kGpioPortCount =
+    static_cast<int>(sizeof(kGpioPorts) / sizeof(kGpioPorts[0]));
+
+constexpr int gpioLineCount(int port_index)
+{
+    if (port_index == 7) {  // GPIOH
+        return 15;
+    }
+    if (port_index == 8) {  // GPIOI
+        return 8;
+    }
+    return 16;
+}
+
+// 每个信息源的默认 GPIO 配置。顺序对应首页的"信息源 1..12"。
+// port 是 kGpioPorts 的下标, -1 表示**还没提供默认映射**。
+//
+// 项目成员会提供 12 组实际默认映射; 在拿到之前全部留 -1,
+// 界面显示"未配置", 由用户在 app 内手动选 —— 不猜引脚。
+struct DefaultSensorConfig {
+    int port;
+    int line;
+};
+
+constexpr DefaultSensorConfig kDefaultSensorConfig[kSensorCount] = {
+    {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+    {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+    {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+};
 
 // 字号 (像素)
 constexpr uint32_t kBigFontPx = 40;     // 主标题
@@ -87,6 +134,18 @@ constexpr uint32_t kColText       = 0xE6E8EA;  // 主文字
 constexpr uint32_t kColTextDim    = 0x8A9199;  // 次要文字 / 未实现按钮
 constexpr uint32_t kColAccent     = 0xFFB020;  // 强调色 (安全琥珀)
 constexpr uint32_t kColOk         = 0x35C46A;  // 状态灯: 就绪/运行中
+
+// 信息源接口页 (覆盖层) 的配色: 参考样图, 深蓝灰底 + 琥珀/橙描边。
+// 只用于接口页, 不影响首页/设置/调试页的深色工业风。
+constexpr uint32_t kSensorBg      = 0x0E141B;  // 页面底色: 深蓝黑, 不用满屏橙
+constexpr uint32_t kSensorPanel   = 0x161D26;  // 侧栏/卡片底色
+constexpr uint32_t kSensorSelected= 0x202A36;  // 当前信息源按钮
+constexpr uint32_t kSensorLine    = 0x2A3644;  // 细描边/分隔线 (低对比)
+constexpr uint32_t kSensorAccent  = 0xF2B544;  // 少量琥珀: 选中/标题/主按钮
+constexpr uint32_t kSensorText    = 0xE8EDF2;  // 正文/按钮文字
+constexpr uint32_t kSensorValue   = 0xFFFFFF;  // 数值
+constexpr uint32_t kSensorDim     = 0x8B97A6;  // 占位/次要文字
+constexpr uint32_t kSensorOk      = 0x4ADE80;  // 正常状态
 
 // 启动后这段时间内的点击一律忽略。窗口刚映射时可能收到启动瞬间遗留的
 // 杂散 ButtonPress, 不挡一下会"一启动就触发某个按钮"。
@@ -312,29 +371,43 @@ enum class Action {
     BuzzerHeartbeat,
     OutBuzzerOn,   // 外部无源蜂鸣器 (GPIOA:6): 只置标志, 脉冲由主循环发
     OutBuzzerOff,
-    LedSingleSettingPage,        // 首页 → LED 调试页
-    BuzzerSingleSettingPage,     // 首页 → 蜂鸣器调试页
-    OutBuzzerSingleSettingPage,  // 首页 → 外部无源蜂鸣器调试页
-    BackToHome,                  // 调试页 → 首页
+    OpenSensor,                   // 首页 → 信息源 N (N 在 ButtonSpec::arg)
+    SettingsPage,                 // 设置页 (本地测试入口)
+    LedSingleSettingPage,         // 设置 → LED 调试页
+    BuzzerSingleSettingPage,      // 设置 → 蜂鸣器调试页
+    OutBuzzerSingleSettingPage,   // 设置 → 外部无源蜂鸣器调试页
+    BackToHome,                   // 任意子页 → 首页
 };
 
 struct ButtonSpec {
     const char *label;  // UTF-8 显示文字
     bool active;        // true = 已实现; false = 占位 (按钮上多画一圈 outline)
     Action action;      // 点击后执行的动作; 只有 active=true 时才有意义
+    int arg = 0;        // 动作参数; 目前只给 Action::OpenSensor 用 (0..11)
 };
 
 // 顶栏右侧的【退出】。它有自己的回调 (onClickQuit), action 不参与派发, 所以填
 // Nothing —— 但字段一样要写全 (见上面 Nothing 的说明)。
 constexpr ButtonSpec kQuitButton = {"退出", true, Action::Nothing};
 
+// 顶栏右侧的小【设置】。本地测试入口都在设置页里, 首页留给 12 个信息源。
+constexpr ButtonSpec kSettingsButton = {"设置", true, Action::SettingsPage};
+
+// 信息源页的【应用】: 只保存 GPIO/线号选择, 不读硬件。
+// 信息源接口页 (覆盖层) 的顶栏/设置按钮。
+constexpr ButtonSpec kOverlayHome = {"首页", true, Action::BackToHome};
+constexpr ButtonSpec kOverlayQuit = {"退出应用", true, Action::Nothing};
+constexpr ButtonSpec kOverlayApply = {"应用设置", true, Action::Nothing};
+constexpr ButtonSpec kOverlayPlaceholder = {"占位", false, Action::Nothing};
+
 // 一个页面 = 一组底栏按钮 + 页名 + **本页每行放几个**。
 //
-// "每行几个"是**每页各自**的参数, 不是全局常量: 首页排 3 列(好放成 2 行 × 3 列),
-// 调试页排 4 列(一行放完最宽裕)。加页面 / 改列数只动下面这张表, 布局自己算。
+// "每行几个"是**每页各自**的参数, 不是全局常量: 首页排 6 列(2 行 × 6 列),
+// 设置/调试页排 4 列, 信息源页 1 列且单按钮居中。
 //
-// 一行里每个按钮等宽(flex_grow), 所以在 1024 宽的屏上: 4 列 ≈ 243 px、3 列 ≈ 328 px
-// —— 中文标签都不会被挤到换行; 触摸目标建议 ≥ 48 px 见方, 高度由 btn_h 保证。
+// 一行里每个按钮等宽(flex_grow), 所以在 1024 宽的屏上: 6 列 ≈ 159 px、
+// 4 列 ≈ 243 px、3 列 ≈ 328 px —— 中文标签都不会被挤到换行;
+// 触摸目标建议 ≥ 48 px 见方, 高度由 btn_h 保证。
 struct PageSpec {
     const char *name;  // 页名: 打印到控制台, 也显示在内容区
     const ButtonSpec *buttons;
@@ -342,19 +415,38 @@ struct PageSpec {
     int columns;  // 本页底栏每行放几个按钮
 };
 
-// 首页: 只留"进调试页"的入口 —— 硬件按钮都挪进各自的调试页, 首页保持干净。
+// 首页: 12 个信息源 (传感器模块) 的入口。
 //
-// 后面那几个 active=false 的是**占位**: 按钮画成暗描边、点了只打印"(占位, 功能待定)",
-// 用来把 2 行 × 3 列排满。有真实功能时把 active 改 true 并绑一个 Action,
-// **别忘了在 onAction() 的 switch 里补 case**(漏了 -Wswitch 会报, 这就是那道防线)。
-// 【外部无源蜂鸣器】就是顶掉原来"功能 8"那一格 —— 格数不变, 首页仍是 2 行 × 3 列。
+// **只预留位置, 不填内容** —— 具体接几个探测器、每个模块有哪些数据项现在都不知道,
+// 所以这里只有"信息源 1..12", 不预置"烟感/温度"这类猜出来的名字。
+// 点进去的模块页显示"尚未配置数据项"; 等模块定义/数据接上后再往那一页填。
 constexpr ButtonSpec kHomeButtons[] = {
+    {"信息源 1", true, Action::OpenSensor, 0},
+    {"信息源 2", true, Action::OpenSensor, 1},
+    {"信息源 3", true, Action::OpenSensor, 2},
+    {"信息源 4", true, Action::OpenSensor, 3},
+    {"信息源 5", true, Action::OpenSensor, 4},
+    {"信息源 6", true, Action::OpenSensor, 5},
+    {"信息源 7", true, Action::OpenSensor, 6},
+    {"信息源 8", true, Action::OpenSensor, 7},
+    {"信息源 9", true, Action::OpenSensor, 8},
+    {"信息源 10", true, Action::OpenSensor, 9},
+    {"信息源 11", true, Action::OpenSensor, 10},
+    {"信息源 12", true, Action::OpenSensor, 11},
+};
+
+// 设置页: 现在所有的本地测试入口。原来放在首页的三个硬件调试页挪到这里;
+// 首页因此腾出位置给 12 个信息源。
+constexpr ButtonSpec kSettingsButtons[] = {
     {"LED 调试", true, Action::LedSingleSettingPage},
     {"蜂鸣器 调试", true, Action::BuzzerSingleSettingPage},
     {"外部无源蜂鸣器", true, Action::OutBuzzerSingleSettingPage},
-    {"功能 A", false, Action::Nothing},
-    {"功能 B", false, Action::Nothing},
-    {"功能 C", false, Action::Nothing},
+    {"返回", true, Action::BackToHome},
+};
+
+// 信息源模块页: 底栏只放【返回】。数据项在内容区那块面板里, 目前是空的。
+constexpr ButtonSpec kSensorButtons[] = {
+    {"返回", true, Action::BackToHome},
 };
 
 // LED 调试页: 单独操作 LED 的开关与心跳, 末位是返回
@@ -393,19 +485,28 @@ constexpr int countOf(const T (&)[N])
 }
 
 // 当前显示哪一页。顺序必须与 kPages 一致, 见下面的 static_assert。
-enum class Page { Home, Led, Buzzer, OutBuzzer };
+// Sensor 是**一类**页: 具体是 12 个里的哪一个由 g_sensor_index 决定。
+enum class Page { Home, Settings, Sensor, Led, Buzzer, OutBuzzer };
 
 constexpr PageSpec kPages[] = {
-    {"首页", kHomeButtons, countOf(kHomeButtons), 3},  // 2 行 × 3 列
+    {"首页", kHomeButtons, countOf(kHomeButtons), 6},  // 12 个信息源: 2 行 × 6 列
+    {"设置", kSettingsButtons, countOf(kSettingsButtons), 4},
+    {"信息源", kSensorButtons, countOf(kSensorButtons), 1},  // 单按钮, 居中
     {"LED 调试页", kLedButtons, countOf(kLedButtons), 4},
     {"蜂鸣器调试页", kBuzzerButtons, countOf(kBuzzerButtons), 4},
     {"外部无源蜂鸣器调试页", kOutBuzzerButtons, countOf(kOutBuzzerButtons), 3},
 };
 
-static_assert(static_cast<int>(Page::Home) == 0 && static_cast<int>(Page::Led) == 1 &&
-                  static_cast<int>(Page::Buzzer) == 2 &&
-                  static_cast<int>(Page::OutBuzzer) == 3,
+static_assert(static_cast<int>(Page::Home) == 0 &&
+                  static_cast<int>(Page::Settings) == 1 &&
+                  static_cast<int>(Page::Sensor) == 2 &&
+                  static_cast<int>(Page::Led) == 3 &&
+                  static_cast<int>(Page::Buzzer) == 4 &&
+                  static_cast<int>(Page::OutBuzzer) == 5,
               "Page 的顺序必须与 kPages 一致");
+
+static_assert(countOf(kHomeButtons) == kSensorCount,
+              "首页按钮数量必须等于 kSensorCount (12 个信息源)");
 
 // columns 会当除数用, 0 会让 rowsOf() 直接除零 —— 在编译期挡住, 别等运行期崩
 constexpr bool columnsAllValid()
@@ -449,8 +550,42 @@ lv_font_t *g_font_status = nullptr;
 
 lv_obj_t *g_footer_bar = nullptr;  // 底栏容器: 只建一次, 切页时清空重建里面的按钮
 lv_obj_t *g_page_label = nullptr;  // 内容区那行状态说明 (页名 + 上一步结果)
+lv_obj_t *g_json_label = nullptr;  // 内容区那行 JSON 状态 (data / smoke)
+unsigned g_json_revision = 0;      // 已经显示过的 JsonStatus::revision
+
+// 内容区有两套内容: 普通页 (halloworld/JSON) 和 信息源模块页 (GPIO 选项 + 数据 + 状态)。
+// 切页时只显示其中一套, 不销毁重建 —— 模块页的下拉框/状态要保留。
+lv_obj_t *g_generic_content = nullptr;
+lv_obj_t *g_sensor_page = nullptr;
+lv_obj_t *g_sensor_title = nullptr;
+lv_obj_t *g_sensor_port_dd = nullptr;
+lv_obj_t *g_sensor_line_dd = nullptr;
+lv_obj_t *g_sensor_status = nullptr;
+
+// 数据项的值标签, 顺序: 烟雾 / 火焰 / 温度 / 蜂鸣器状态 / LED 状态。
+// 现在只显示默认值/占位符; 以后数据源接上后改这些标签即可。
+lv_obj_t *g_sensor_values[5] = {};
+
+// 最近一次收到的完整帧 (含 {"start":1} / {"end":1}), 显示在信息源页。
+lv_obj_t *g_sensor_frame_label = nullptr;
+unsigned g_sensor_frame_revision = 0;
+int g_sensor_frame_source = -1;
+
+// 接口页左侧的 12 个信息源按钮; 用来高亮当前选中的模块。
+lv_obj_t *g_sensor_side_buttons[kSensorCount] = {};
+
+// 每个信息源模块各自的 GPIO 选择。现在只保存 UI 选择, 不读硬件 ——
+// "已应用"只表示用户确认了 GPIO/线号, 不表示数据已经接上。
+// 0 = 正常、1 = 异常由传感器模块那边定义, app 这边不再做极性换算。
+struct SensorConfig {
+    int port = -1;      // kGpioPorts 下标; -1 = 未配置
+    int line = -1;      // 线号; -1 = 未配置
+    bool applied = false;
+};
+SensorConfig g_sensor_cfg[kSensorCount];
 
 Page g_page = Page::Home;
+int g_sensor_index = 0;  // Page::Sensor 时对应 0..11
 
 // 切页请求。事件回调里**只置这个标志**, 真正的重建放到主循环里做 ——
 // 否则会在"正在派发某个按钮的点击"的过程中删掉它所在的底栏。
@@ -471,17 +606,290 @@ uint32_t g_start_tick = 0;
 // (例如 --help 提前返回), 不能对没初始化过的 LVGL 调 lv_deinit()。
 bool g_lv_inited = false;
 
+// 当前页名。Page::Sensor 是一类页, 名字要带上具体的信息源编号。
+const char *pageName()
+{
+    if (g_page == Page::Sensor) {
+        static char name[32];
+        std::snprintf(name, sizeof name, "信息源 %d", g_sensor_index + 1);
+        return name;
+    }
+    return kPages[static_cast<int>(g_page)].name;
+}
+
 // 内容区那行小字: "页名", 或 "页名 · 上一步结果"
 void refreshPageLabel()
 {
     if (g_page_label == nullptr) {
         return;
     }
-    const PageSpec &page = kPages[static_cast<int>(g_page)];
+    const char *name = pageName();
     if (g_last_outcome != nullptr) {
-        lv_label_set_text_fmt(g_page_label, "%s · %s", page.name, g_last_outcome);
+        lv_label_set_text_fmt(g_page_label, "%s · %s", name, g_last_outcome);
     } else {
-        lv_label_set_text(g_page_label, page.name);
+        lv_label_set_text(g_page_label, name);
+    }
+}
+
+// 生成端口下拉选项 (GPIOA\nGPIOB\n...)。和 kGpioPorts 保持同一顺序。
+void buildPortOptions(char *buf, size_t size)
+{
+    if (buf == nullptr || size == 0) {
+        return;
+    }
+    size_t used = 0;
+    for (int i = 0; i < kGpioPortCount; i++) {
+        const int n = std::snprintf(buf + used, size - used, i == 0 ? "%s" : "\n%s",
+                                    kGpioPorts[i]);
+        if (n < 0) {
+            break;
+        }
+        const size_t add = static_cast<size_t>(n);
+        if (add >= size - used) {
+            used = size - 1;
+            break;
+        }
+        used += add;
+    }
+    buf[used < size ? used : size - 1] = '\0';
+}
+
+// 生成某个 GPIO 控制器的线号选项 (0..N-1)。
+// LVGL 的 dropdown 需要一段以 \n 分隔的文本; 64 字节足够放 0..15。
+void buildLineOptions(int port_index, char *buf, size_t size)
+{
+    if (buf == nullptr || size == 0) {
+        return;
+    }
+    const int count = gpioLineCount(port_index);
+    size_t used = 0;
+    for (int i = 0; i < count; i++) {
+        const int n = std::snprintf(buf + used, size - used, i == 0 ? "%d" : "\n%d", i);
+        if (n < 0) {
+            break;
+        }
+        const size_t add = static_cast<size_t>(n);
+        if (add >= size - used) {
+            used = size - 1;
+            break;
+        }
+        used += add;
+    }
+    buf[used < size ? used : size - 1] = '\0';
+}
+
+// 切换端口后重建线号下拉框, 并把选择退回 0 —— 不同控制器的线数不同
+// (GPIOH 15, GPIOI 8, 其余 16), 不能留着上一条端口的线号。
+void updateLineOptions(int port_index)
+{
+    if (g_sensor_line_dd == nullptr) {
+        return;
+    }
+    char options[64] = {};
+    buildLineOptions(port_index, options, sizeof options);
+    lv_dropdown_set_options(g_sensor_line_dd, options);
+    lv_dropdown_set_selected(g_sensor_line_dd, 0);
+}
+
+// 用代码里的默认表初始化 12 个模块。默认映射有效 = 已配置;
+// 还没有提供映射 (-1) 的模块保持"未配置", 等用户在 app 内选。
+void initSensorDefaults()
+{
+    for (int i = 0; i < kSensorCount; i++) {
+        const DefaultSensorConfig &def = kDefaultSensorConfig[i];
+        SensorConfig &cfg = g_sensor_cfg[i];
+        cfg.port = def.port;
+        cfg.line = def.line;
+        cfg.applied = (cfg.port >= 0 && cfg.port < kGpioPortCount &&
+                       cfg.line >= 0 && cfg.line < gpioLineCount(cfg.port));
+    }
+}
+
+// 模块状态: 只描述"选择"到哪一步, 不假装数据已经接上。
+// 0 = 正常 / 1 = 异常 由传感器模块定义, 这里不做极性换算。
+void updateSensorStatus()
+{
+    if (g_sensor_status == nullptr) {
+        return;
+    }
+
+    const SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
+    const bool valid = cfg.applied && cfg.port >= 0 && cfg.port < kGpioPortCount &&
+                       cfg.line >= 0 && cfg.line < gpioLineCount(cfg.port);
+    if (!valid) {
+        lv_label_set_text(g_sensor_status, "未配置");
+        lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorDim), 0);
+        return;
+    }
+
+    lv_label_set_text_fmt(g_sensor_status, "已选择 %s:%d（等待数据接入）",
+                          kGpioPorts[cfg.port], cfg.line);
+    lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorAccent), 0);
+}
+
+// 下拉框改了但还没点【应用】: 明确告诉用户"有未应用的更改"。
+void markSensorDirty()
+{
+    g_sensor_cfg[g_sensor_index].applied = false;
+    if (g_sensor_status != nullptr) {
+        lv_label_set_text(g_sensor_status, "有未应用的更改");
+        lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorAccent), 0);
+    }
+}
+
+void refreshSensorFrameLabel(bool force);
+
+// 左侧信息源按钮的选中态: 当前模块描边加粗、底色提亮。
+void refreshSidebarSelection()
+{
+    for (int i = 0; i < kSensorCount; i++) {
+        lv_obj_t *btn = g_sensor_side_buttons[i];
+        if (btn == nullptr) {
+            continue;
+        }
+        const bool selected = (i == g_sensor_index);
+        lv_obj_set_style_border_width(btn, selected ? 2 : 1, 0);
+        lv_obj_set_style_border_color(btn,
+                                      lv_color_hex(selected ? kSensorAccent : kSensorLine), 0);
+        lv_obj_set_style_bg_color(btn,
+                                  lv_color_hex(selected ? kSensorSelected : kSensorPanel), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        if (selected) {
+            lv_obj_scroll_to_view(btn, LV_ANIM_OFF);
+        }
+    }
+}
+
+// 把当前模块保存的选择填回控件。切页 / 首次进入模块页时调用。
+// 没配置时控件先落在 GPIOA:0, 但状态仍是"未配置" —— 不把默认显示当成已保存。
+void loadSensorControls()
+{
+    if (g_sensor_port_dd == nullptr || g_sensor_line_dd == nullptr) {
+        return;
+    }
+
+    const SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
+    const int ui_port = (cfg.port >= 0 && cfg.port < kGpioPortCount) ? cfg.port : 0;
+    const int ui_line = (cfg.line >= 0 && cfg.line < gpioLineCount(ui_port)) ? cfg.line : 0;
+
+    if (g_sensor_title != nullptr) {
+        lv_label_set_text_fmt(g_sensor_title, "信息源 %d", g_sensor_index + 1);
+    }
+    lv_dropdown_set_selected(g_sensor_port_dd, ui_port);
+    updateLineOptions(ui_port);
+    lv_dropdown_set_selected(g_sensor_line_dd, ui_line);
+    updateSensorStatus();
+    refreshSidebarSelection();
+    refreshSensorFrameLabel(true);
+}
+
+void onSensorPortChanged(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    updateLineOptions(lv_dropdown_get_selected(g_sensor_port_dd));
+    markSensorDirty();
+}
+
+void onSensorOptionChanged(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    markSensorDirty();
+}
+
+// 【应用】只保存选择, 不读 GPIO —— 现在还没有"按信息源读硬件"的实现,
+// 不能在这里假装读到了一个值。状态里明确写"等待数据接入"。
+void onApplySensorConfig(lv_event_t *e)
+{
+    LV_UNUSED(e);
+
+    SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
+    cfg.port = lv_dropdown_get_selected(g_sensor_port_dd);
+    cfg.line = lv_dropdown_get_selected(g_sensor_line_dd);
+
+    if (cfg.port < 0 || cfg.port >= kGpioPortCount) {
+        cfg.port = 0;
+    }
+    if (cfg.line < 0 || cfg.line >= gpioLineCount(cfg.port)) {
+        cfg.line = 0;
+    }
+
+    cfg.applied = true;
+    updateSensorStatus();
+
+    std::printf("信息源 %d 应用: %s:%d (仅保存选择, 未读硬件)\n",
+                g_sensor_index + 1, kGpioPorts[cfg.port], cfg.line);
+    std::fflush(stdout);
+}
+
+// 内容区切换: 普通页显示 halloworld/JSON, 信息源页显示 GPIO 选项/数据/状态。
+void refreshPageContent()
+{
+    if (g_generic_content == nullptr || g_sensor_page == nullptr) {
+        return;
+    }
+
+    if (g_page == Page::Sensor) {
+        lv_obj_add_flag(g_generic_content, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(g_sensor_page, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(g_sensor_page);  // 盖住普通页的顶栏/底栏
+        loadSensorControls();
+    } else {
+        lv_obj_remove_flag(g_generic_content, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_sensor_page, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// 内容区那行 JSON 状态。
+//
+// 只在 JsonStatus::revision 变化时重设标签: status() 每 200 ms 刷新一次,
+// 文件内容没变时 revision 不动, 这里不会每帧都触发 LVGL 重新布局。
+// 解析失败也显示出来 —— "未识别"本身就是要让人看到的状态。
+void refreshJsonLabel()
+{
+    if (g_json_label == nullptr) {
+        return;
+    }
+
+    const firecontrol::JsonStatus json = firecontrol::json_status();
+    if (g_json_revision == json.revision && g_json_revision != 0) {
+        return;
+    }
+    g_json_revision = json.revision;
+
+    if (json.valid) {
+        lv_label_set_text_fmt(g_json_label, "JSON  data = %d    smoke = %d", json.data,
+                              json.smoke);
+        lv_obj_set_style_text_color(g_json_label, lv_color_hex(kColText), 0);
+    } else {
+        lv_label_set_text_fmt(g_json_label, "JSON  未识别 (%s)",
+                              json.error != nullptr ? json.error : "未知错误");
+        // 解析失败用强调色, 别让"未识别"混在次要文字里被忽略。
+        lv_obj_set_style_text_color(g_json_label, lv_color_hex(kColAccent), 0);
+    }
+}
+
+// 信息源页底部的"收到的报文": 每个信息源各自一份完整帧。
+// 只有 start/end 都到齐的帧才会更新; 还没接线的信息源显示"暂无"。
+void refreshSensorFrameLabel(bool force = false)
+{
+    if (g_sensor_frame_label == nullptr) {
+        return;
+    }
+
+    const firecontrol::JsonStatus json = firecontrol::json_status_for(g_sensor_index);
+    if (!force && g_sensor_frame_source == g_sensor_index &&
+        g_sensor_frame_revision == json.revision && g_sensor_frame_revision != 0) {
+        return;
+    }
+    g_sensor_frame_source = g_sensor_index;
+    g_sensor_frame_revision = json.revision;
+
+    if (json.has_frame && !json.frame.empty()) {
+        lv_label_set_text(g_sensor_frame_label, json.frame.c_str());
+        lv_obj_set_style_text_color(g_sensor_frame_label, lv_color_hex(kSensorValue), 0);
+    } else {
+        lv_label_set_text(g_sensor_frame_label, "暂无");
+        lv_obj_set_style_text_color(g_sensor_frame_label, lv_color_hex(kSensorDim), 0);
     }
 }
 
@@ -534,6 +942,7 @@ void onAction(lv_event_t *e)
     // 用兜底串既消掉警告, 也真的兜住了那种情况 —— 而不是靠加 default 把
     // -Wswitch 那道"漏了 case"的防线拆掉。
     const char *outcome = "(未知动作)";
+    char outcome_buf[64] = {};  // OpenSensor 的 "进入信息源 N" 用
     bool page_switch = false;
 
     // 按动作派发。switch 里不写 default —— 以后往 Action 里加成员但忘了加
@@ -572,6 +981,29 @@ void onAction(lv_event_t *e)
         break;
     case Action::Nothing:
         outcome = "(占位, 功能待定)";
+        break;
+
+    // 首页的 12 个信息源入口: 具体是哪一个由 ButtonSpec::arg 决定。
+    // Page::Sensor 是同一类页, 用 g_sensor_index 区分。
+    case Action::OpenSensor: {
+        int idx = spec->arg;
+        if (idx < 0 || idx >= kSensorCount) {
+            idx = 0;  // 表外参数不该出现; 退到第 1 个, 不越界
+        }
+        g_sensor_index = idx;
+        g_page = Page::Sensor;
+        g_page_dirty = true;
+        page_switch = true;
+        std::snprintf(outcome_buf, sizeof outcome_buf, "进入信息源 %d", idx + 1);
+        outcome = outcome_buf;
+        break;
+    }
+    // 顶栏小【设置】: 本地测试入口都收在这一页。
+    case Action::SettingsPage:
+        g_page = Page::Settings;
+        g_page_dirty = true;
+        page_switch = true;
+        outcome = "进入设置";
         break;
 
     // 切页: 只改 g_page 并置标志, 底栏由主循环重建 (见 g_page_dirty 的说明)
@@ -760,23 +1192,48 @@ void buildHeader(lv_obj_t *scr, int win_w, int bar_h, int margin)
         lv_obj_set_style_text_font(state_text, g_font_status, 0);
     }
 
-    // --- 右: 退出 ---
-    lv_obj_t *quit_btn = createButton(bar, kQuitButton, onClickQuit);
-    lv_obj_set_size(quit_btn, pct(win_w, 9), bar_h - 26);
+    // --- 右: 设置 + 退出 ---
+    // 用一个右侧小容器把两个按钮放在一起, 避免 SPACE_BETWEEN 把设置按钮
+    // 拉到顶栏中间。容器宽度显式算出来: LV_SIZE_CONTENT 在"先建容器、后设
+    // 子对象尺寸"的顺序下可能还没算进子对象, 设置按钮会看不见。
+    const int top_btn_h = bar_h - 26;
+    const int settings_w = pct(win_w, 7);
+    const int quit_w = pct(win_w, 9);
+    constexpr int kTopButtonGap = 8;
+
+    lv_obj_t *right = createPane(bar);
+    lv_obj_set_size(right, settings_w + kTopButtonGap + quit_w, top_btn_h);
+    lv_obj_set_flex_flow(right, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(right, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *settings_btn = createButton(right, kSettingsButton, onAction);
+    lv_obj_set_size(settings_btn, settings_w, top_btn_h);
+
+    lv_obj_t *quit_btn = createButton(right, kQuitButton, onClickQuit);
+    lv_obj_set_size(quit_btn, quit_w, top_btn_h);
 }
 
-// 中间内容区: 主标题 + 一条强调色短线 + 一行小字 (页名 / 上一步结果)
+// 中间内容区。两套内容共用这块区域:
+//   普通页: halloworld + 页名 + JSON 状态
+//   信息源页: GPIO 选项 / 数据项 / 模块状态 (剩下的留空)
 void buildContent(lv_obj_t *scr, int win_w, int top, int h)
 {
     lv_obj_t *content = createPane(scr);
     lv_obj_set_size(content, win_w, h);
     lv_obj_align(content, LV_ALIGN_TOP_MID, 0, top);
-    lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(content, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(content, 14, 0);
 
-    lv_obj_t *title = lv_label_create(content);
+    // ---------------- 普通页 ----------------
+    lv_obj_t *generic = createPane(content);
+    lv_obj_set_size(generic, win_w, h);
+    lv_obj_align(generic, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_flex_flow(generic, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(generic, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(generic, 14, 0);
+    g_generic_content = generic;
+
+    lv_obj_t *title = lv_label_create(generic);
     lv_label_set_text(title, kText);
     lv_obj_set_style_text_color(title, lv_color_hex(kColText), 0);
     lv_obj_set_style_text_letter_space(title, 3, 0);
@@ -785,20 +1242,32 @@ void buildContent(lv_obj_t *scr, int win_w, int top, int h)
     }
 
     // 装饰用的强调色短线: 不承载信息, 只是把视线钉在标题上
-    lv_obj_t *rule = createPane(content);
+    lv_obj_t *rule = createPane(generic);
     lv_obj_set_size(rule, 72, 3);
     lv_obj_set_style_bg_color(rule, lv_color_hex(kColAccent), 0);
     lv_obj_set_style_bg_opa(rule, LV_OPA_COVER, 0);
 
     // 页名 / 上一步结果。切页和每次点按钮之后由 refreshPageLabel() 更新 ——
     // 板上没接控制台时, 这一行就是"刚才那一下成没成"的唯一反馈。
-    lv_obj_t *status = lv_label_create(content);
+    lv_obj_t *status = lv_label_create(generic);
     lv_obj_set_style_text_color(status, lv_color_hex(kColTextDim), 0);
     if (g_font_status != nullptr) {
         lv_obj_set_style_text_font(status, g_font_status, 0);
     }
-    lv_label_set_text(status, kPages[static_cast<int>(g_page)].name);
+    lv_label_set_text(status, pageName());
     g_page_label = status;
+
+    // JSON 状态: 最基础的 {"data":1,"smoke":1} 解析结果。
+    lv_obj_t *json = lv_label_create(generic);
+    lv_obj_set_style_text_color(json, lv_color_hex(kColTextDim), 0);
+    if (g_font_status != nullptr) {
+        lv_obj_set_style_text_font(json, g_font_status, 0);
+    }
+    lv_label_set_text(json, "JSON  等待数据");
+    g_json_label = json;
+    refreshJsonLabel();
+
+    // 信息源接口页现在是一个独立的覆盖层, 由 buildSensorOverlay() 创建。
 }
 
 // 底部操作栏的容器: 深色面板 + 顶边分隔线。
@@ -842,12 +1311,15 @@ void buildPageButtons()
     const PageSpec &page = kPages[static_cast<int>(g_page)];
     const int grid_w = g_win_w - 2 * g_margin;
     const int rows = rowsOf(page.count, page.columns);
+    // 只有一个按钮的页 (信息源模块页的【返回】) 居中显示, 不拉成整行宽。
+    const bool single = (page.count == 1);
 
     for (int r = 0; r < rows; r++) {
         lv_obj_t *row = createPane(g_footer_bar);
         lv_obj_set_size(row, grid_w, g_btn_h);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+        lv_obj_set_flex_align(row,
+                              single ? LV_FLEX_ALIGN_CENTER : LV_FLEX_ALIGN_SPACE_BETWEEN,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(row, g_margin, 0);
 
@@ -859,7 +1331,11 @@ void buildPageButtons()
             if (i < page.count) {
                 lv_obj_t *btn = createButton(row, page.buttons[i], onAction);
                 lv_obj_set_height(btn, g_btn_h);
-                lv_obj_set_flex_grow(btn, 1);
+                if (single) {
+                    lv_obj_set_width(btn, pct(g_win_w, 25));
+                } else {
+                    lv_obj_set_flex_grow(btn, 1);
+                }
             } else {
                 lv_obj_t *slot = createPane(row);  // 透明占位: 只占宽度, 不显示
                 lv_obj_set_height(slot, g_btn_h);
@@ -868,6 +1344,365 @@ void buildPageButtons()
         }
     }
     refreshPageLabel();
+}
+
+// ---------------------------------------------------------------------------
+// 信息源接口页 (覆盖层)
+//
+// 参考样图: 深蓝灰底 + 琥珀描边; 顶栏(品牌/首页/退出) + 左侧信息源列表 +
+// 中间接收卡片 + 右侧信息源设置。整页是 screen 的最后一个子对象, 只在
+// Page::Sensor 时显示, 会盖住普通页的顶栏/底栏。
+// ---------------------------------------------------------------------------
+void applySensorButtonSkin(lv_obj_t *btn, bool active, bool selected)
+{
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_bg_color(btn,
+                              lv_color_hex(selected ? kSensorSelected : kSensorPanel), 0);
+    lv_obj_set_style_bg_opa(btn, active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn, selected ? 2 : 1, 0);
+    lv_obj_set_style_border_color(btn,
+                                  lv_color_hex(selected ? kSensorAccent
+                                                        : (active ? kSensorLine : kSensorDim)), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(kSensorSelected), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(btn, lv_color_hex(kSensorAccent), LV_STATE_PRESSED);
+}
+
+lv_obj_t *createSensorLabel(lv_obj_t *parent, const char *text, uint32_t color,
+                            const lv_font_t *font)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    if (font != nullptr) {
+        lv_obj_set_style_text_font(label, font, 0);
+    }
+    return label;
+}
+
+lv_obj_t *createSensorButton(lv_obj_t *parent, const ButtonSpec &spec,
+                             lv_event_cb_t cb, bool selected = false)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    applySensorButtonSkin(btn, spec.active, selected);
+
+    if (cb != nullptr) {
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED,
+                            const_cast<ButtonSpec *>(&spec));
+    }
+
+    const uint32_t label_color = selected ? kSensorAccent
+                                           : (spec.active ? kSensorText : kSensorDim);
+    lv_obj_t *label = createSensorLabel(btn, spec.label, label_color, g_font_small);
+    lv_obj_center(label);
+    return btn;
+}
+
+void styleSensorDropdownList(lv_obj_t *list)
+{
+    if (list == nullptr) {
+        return;
+    }
+    lv_obj_set_style_bg_color(list, lv_color_hex(kSensorPanel), 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(list, 1, 0);
+    lv_obj_set_style_border_color(list, lv_color_hex(kSensorLine), 0);
+    lv_obj_set_style_text_color(list, lv_color_hex(kSensorValue), 0);
+    if (g_font_small != nullptr) {
+        lv_obj_set_style_text_font(list, g_font_small, 0);
+    }
+    lv_obj_set_style_bg_color(list, lv_color_hex(kSensorAccent), LV_PART_SELECTED);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, LV_PART_SELECTED);
+    lv_obj_set_style_text_color(list, lv_color_hex(kSensorBg), LV_PART_SELECTED);
+}
+
+void onSensorDropdownReady(lv_event_t *e)
+{
+    styleSensorDropdownList(lv_dropdown_get_list(lv_event_get_target_obj(e)));
+}
+
+void styleSensorDropdown(lv_obj_t *dd)
+{
+    lv_obj_set_style_bg_color(dd, lv_color_hex(kSensorPanel), 0);
+    lv_obj_set_style_bg_opa(dd, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dd, 1, 0);
+    lv_obj_set_style_border_color(dd, lv_color_hex(kSensorLine), 0);
+    lv_obj_set_style_radius(dd, 8, 0);
+    lv_obj_set_style_text_color(dd, lv_color_hex(kSensorValue), 0);
+    lv_obj_set_style_pad_all(dd, 10, 0);
+    if (g_font_small != nullptr) {
+        lv_obj_set_style_text_font(dd, g_font_small, 0);
+    }
+    lv_obj_set_style_border_color(dd, lv_color_hex(kSensorAccent), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(dd, 0, LV_STATE_FOCUSED);
+    lv_dropdown_set_symbol(dd, nullptr);
+    lv_dropdown_set_selected_highlight(dd, false);
+    lv_obj_add_event_cb(dd, onSensorDropdownReady, LV_EVENT_READY, nullptr);
+    styleSensorDropdownList(lv_dropdown_get_list(dd));
+}
+
+lv_obj_t *createSensorDropdownRow(lv_obj_t *parent, lv_obj_t **out_dd,
+                                  const char *options, lv_event_cb_t cb)
+{
+    lv_obj_t *row = createPane(parent);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, 44);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 8, 0);
+
+    lv_obj_t *dd = lv_dropdown_create(row);
+    lv_dropdown_set_options(dd, options);
+    lv_obj_set_height(dd, 44);
+    lv_obj_set_flex_grow(dd, 1);
+    styleSensorDropdown(dd);
+    if (cb != nullptr) {
+        lv_obj_add_event_cb(dd, cb, LV_EVENT_VALUE_CHANGED, nullptr);
+    }
+    createSensorLabel(row, "v", kSensorDim, g_font_status);
+
+    if (out_dd != nullptr) {
+        *out_dd = dd;
+    }
+    return row;
+}
+
+lv_obj_t *createSensorCard(lv_obj_t *parent, int height)
+{
+    lv_obj_t *card = createPane(parent);
+    lv_obj_set_width(card, LV_PCT(100));
+    lv_obj_set_height(card, height);
+    lv_obj_set_style_bg_color(card, lv_color_hex(kSensorPanel), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(kSensorLine), 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_set_style_pad_row(card, 4, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    return card;
+}
+
+lv_obj_t *addSensorDataRow(lv_obj_t *parent, const char *name, const char *value,
+                           const char *state, bool placeholder)
+{
+    lv_obj_t *row = createPane(parent);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, 24);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *name_label = createSensorLabel(row, name, kSensorDim, g_font_status);
+    lv_obj_set_width(name_label, LV_PCT(45));
+
+    lv_obj_t *value_label = createSensorLabel(row, value,
+                                              placeholder ? kSensorDim : kSensorValue,
+                                              g_font_small);
+    lv_obj_set_width(value_label, LV_PCT(20));
+    lv_obj_set_style_text_align(value_label, LV_TEXT_ALIGN_RIGHT, 0);
+
+    lv_obj_t *state_label = createSensorLabel(row, state,
+                                              placeholder ? kSensorDim : kSensorOk,
+                                              g_font_status);
+    lv_obj_set_width(state_label, LV_PCT(30));
+    lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_RIGHT, 0);
+    return value_label;
+}
+
+void buildSensorTopBar(lv_obj_t *parent, int win_w, int top_h)
+{
+    lv_obj_t *bar = createPane(parent);
+    lv_obj_set_size(bar, win_w, top_h);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(kSensorBg), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar, 1, 0);
+    lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(bar, lv_color_hex(kSensorLine), 0);
+    lv_obj_set_style_pad_hor(bar, 16, 0);
+    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *left = createPane(bar);
+    lv_obj_set_size(left, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(left, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(left, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(left, 10, 0);
+
+    lv_obj_t *box = createPane(left);
+    lv_obj_set_size(box, 18, 18);
+    lv_obj_set_style_border_width(box, 1, 0);
+    lv_obj_set_style_border_color(box, lv_color_hex(kSensorAccent), 0);
+    lv_obj_set_style_radius(box, 2, 0);
+
+    createSensorLabel(left, "火灾控制终端", kSensorText, g_font_small);
+    createSensorLabel(left, "|", kSensorDim, g_font_status);
+
+    lv_obj_t *dot = createPane(left);
+    lv_obj_set_size(dot, 8, 8);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, lv_color_hex(kColOk), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    createSensorLabel(left, "运行中", kSensorOk, g_font_status);
+
+    lv_obj_t *home = createSensorButton(bar, kOverlayHome, onAction);
+    lv_obj_set_size(home, 220, 42);
+
+    lv_obj_t *quit = createSensorButton(bar, kOverlayQuit, onClickQuit);
+    lv_obj_set_size(quit, 160, 42);
+}
+
+void buildSensorSidebar(lv_obj_t *parent, int left_w, int top_h, int body_h)
+{
+    lv_obj_t *side = createPane(parent);
+    lv_obj_set_size(side, left_w, body_h);
+    lv_obj_align(side, LV_ALIGN_TOP_LEFT, 0, top_h);
+    lv_obj_set_style_bg_color(side, lv_color_hex(kSensorBg), 0);
+    lv_obj_set_style_bg_opa(side, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(side, 1, 0);
+    lv_obj_set_style_border_side(side, LV_BORDER_SIDE_RIGHT, 0);
+    lv_obj_set_style_border_color(side, lv_color_hex(kSensorLine), 0);
+    lv_obj_set_style_pad_all(side, 12, 0);
+    lv_obj_set_style_pad_row(side, 10, 0);
+    lv_obj_set_flex_flow(side, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(side, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(side, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(side, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(side, LV_SCROLLBAR_MODE_AUTO);
+
+    for (int i = 0; i < kSensorCount; i++) {
+        lv_obj_t *btn = createSensorButton(side, kHomeButtons[i], onAction,
+                                           i == g_sensor_index);
+        lv_obj_set_width(btn, LV_PCT(100));
+        lv_obj_set_height(btn, 56);
+        g_sensor_side_buttons[i] = btn;
+    }
+}
+
+void buildSensorMain(lv_obj_t *parent, int main_w, int left_w, int top_h, int body_h)
+{
+    lv_obj_t *main = createPane(parent);
+    lv_obj_set_size(main, main_w, body_h);
+    lv_obj_align(main, LV_ALIGN_TOP_LEFT, left_w, top_h);
+    lv_obj_set_style_bg_color(main, lv_color_hex(kSensorBg), 0);
+    lv_obj_set_style_bg_opa(main, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(main, 14, 0);
+    lv_obj_set_style_pad_row(main, 14, 0);
+    lv_obj_set_flex_flow(main, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(main, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    // 接收卡片
+    lv_obj_t *recv = createSensorCard(main, 230);
+    createSensorLabel(recv, "接收：", kSensorAccent, g_font_small);
+    g_sensor_values[0] = addSensorDataRow(recv, "烟雾状态", "0", "正常", false);
+    g_sensor_values[1] = addSensorDataRow(recv, "火焰状态", "0", "正常", false);
+    g_sensor_values[2] = addSensorDataRow(recv, "温度状态", "--", "待接入", true);
+    g_sensor_values[3] = addSensorDataRow(recv, "蜂鸣器状态", "--", "规则待定", true);
+    g_sensor_values[4] = addSensorDataRow(recv, "LED状态", "--", "规则待定", true);
+
+    // 模块状态 / 完整报文卡片
+    lv_obj_t *info = createSensorCard(main, 200);
+    lv_obj_add_flag(info, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(info, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(info, LV_SCROLLBAR_MODE_AUTO);
+
+    lv_obj_t *status_row = createPane(info);
+    lv_obj_set_width(status_row, LV_PCT(100));
+    lv_obj_set_height(status_row, 24);
+    lv_obj_set_flex_flow(status_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(status_row, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(status_row, 8, 0);
+    createSensorLabel(status_row, "模块状态：", kSensorDim, g_font_status);
+    g_sensor_status = createSensorLabel(status_row, "未配置", kSensorValue, g_font_status);
+
+    createSensorLabel(info, "收到的报文：", kSensorDim, g_font_status);
+    g_sensor_frame_label = createSensorLabel(info, "暂无", kSensorValue, g_font_status);
+    lv_obj_set_width(g_sensor_frame_label, LV_PCT(100));
+    lv_label_set_long_mode(g_sensor_frame_label, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t *reserve = createPane(info);
+    lv_obj_set_width(reserve, LV_PCT(100));
+    lv_obj_set_height(reserve, 24);
+    lv_obj_set_flex_flow(reserve, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(reserve, 8, 0);
+    createSensorLabel(reserve, "预留：", kSensorDim, g_font_status);
+    createSensorLabel(reserve, "", kSensorDim, g_font_status);
+}
+
+void buildSensorSettings(lv_obj_t *parent, int right_w, int x, int top_h, int body_h)
+{
+    lv_obj_t *right = createPane(parent);
+    lv_obj_set_size(right, right_w, body_h);
+    lv_obj_align(right, LV_ALIGN_TOP_LEFT, x, top_h);
+    lv_obj_set_style_bg_color(right, lv_color_hex(kSensorBg), 0);
+    lv_obj_set_style_bg_opa(right, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(right, 1, 0);
+    lv_obj_set_style_border_side(right, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_color(right, lv_color_hex(kSensorLine), 0);
+    lv_obj_set_style_pad_all(right, 16, 0);
+    lv_obj_set_style_pad_row(right, 12, 0);
+    lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(right, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    createSensorLabel(right, "信息源设置", kSensorAccent, g_font_small);
+
+    createSensorLabel(right, "GPIO 接口", kSensorDim, g_font_status);
+    char port_options[96] = {};
+    buildPortOptions(port_options, sizeof port_options);
+    createSensorDropdownRow(right, &g_sensor_port_dd, port_options,
+                            onSensorPortChanged);
+
+    createSensorLabel(right, "线号", kSensorDim, g_font_status);
+    char line_options[64] = {};
+    buildLineOptions(0, line_options, sizeof line_options);
+    createSensorDropdownRow(right, &g_sensor_line_dd, line_options,
+                            onSensorOptionChanged);
+
+    lv_obj_t *placeholder = createSensorButton(right, kOverlayPlaceholder, nullptr);
+    lv_obj_set_width(placeholder, LV_PCT(100));
+    lv_obj_set_height(placeholder, 44);
+
+    // 把"应用设置"推到面板底部
+    lv_obj_t *spacer = createPane(right);
+    lv_obj_set_width(spacer, LV_PCT(100));
+    lv_obj_set_flex_grow(spacer, 1);
+
+    lv_obj_t *apply = createSensorButton(right, kOverlayApply, onApplySensorConfig, true);
+    lv_obj_set_width(apply, LV_PCT(100));
+    lv_obj_set_height(apply, 44);
+}
+
+void buildSensorOverlay(lv_obj_t *scr, int win_w, int win_h)
+{
+    lv_obj_t *overlay = createPane(scr);
+    lv_obj_set_size(overlay, win_w, win_h);
+    lv_obj_align(overlay, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(kSensorBg), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+    g_sensor_page = overlay;
+
+    const int top_h = pct(win_h, 10);
+    const int left_w = pct(win_w, 22);
+    const int right_w = pct(win_w, 24);
+    const int body_h = win_h - top_h;
+
+    buildSensorTopBar(overlay, win_w, top_h);
+    buildSensorSidebar(overlay, left_w, top_h, body_h);
+    buildSensorMain(overlay, win_w - left_w - right_w, left_w, top_h, body_h);
+    buildSensorSettings(overlay, right_w, win_w - right_w, top_h, body_h);
+
+    lv_obj_move_foreground(overlay);
 }
 
 void buildUi(int win_w, int win_h)
@@ -880,6 +1715,7 @@ void buildUi(int win_w, int win_h)
 
     g_win_w = win_w;
     g_margin = pct(win_w, 1);
+    initSensorDefaults();
 
     // 底栏按钮高度。触摸屏上手指触点约 40~50 px, 原来取屏高 9%(1024x600 上 54 px)
     // —— 实测**手感偏紧, 不好按**, 所以提到 13%: 同一块屏上是 78 px(高了 44%)。
@@ -897,6 +1733,7 @@ void buildUi(int win_w, int win_h)
     buildHeader(scr, win_w, header_h, g_margin);
     const int footer_h = buildFooter(scr, win_w, g_btn_h, g_margin);
     buildContent(scr, win_w, header_h, win_h - header_h - footer_h);
+    buildSensorOverlay(scr, win_w, win_h);
     buildPageButtons();  // 首页
 }
 
@@ -940,7 +1777,7 @@ int gui_build()
         } else if (std::strcmp(g_argv[i], "-h") == 0 ||
                    std::strcmp(g_argv[i], "--help") == 0) {
             std::printf("用法: %s [--windowed] [--font=<字体文件>]\n"
-                        "  (无参数)     全屏 —— 板上用这个 (按屏幕实际尺寸铺满)\n"
+                        "  (无参数)     按屏幕尺寸建窗口 —— 板上用这个 (是否铺满由 WM 决定)\n"
                         "  --windowed   1024x600 窗口模式 —— 开发机预览用\n"
                         "  --font=FILE  指定字体文件 (默认按候选表自动找)\n"
                         "  -h, --help   显示本帮助\n"
@@ -962,7 +1799,7 @@ int gui_build()
     // -----------------------------------------------------------------------
     // 先探一下 X server
     //
-    // 两件事: 全屏模式要知道屏幕实际尺寸 (LVGL 的 X11 后端只会按给它的尺寸
+    // 两件事: 无参数模式要知道屏幕实际尺寸 (LVGL 的 X11 后端只会按给它的尺寸
     // 建窗口, 不会自己查屏幕), 以及连不上时把排查方法讲清楚。
     // 这个连接只是查询, 查完就关 —— 真正绘图的连接由 LVGL 自己开。
     // -----------------------------------------------------------------------
@@ -992,14 +1829,15 @@ int gui_build()
 
     // 窗口尺寸按屏幕实际尺寸算。
     //
-    // 板上确认跑着 **Openbox** (桌面环境 LXDE, 见 NOTES.md §3「目标板环境」), 所以
-    // 这个窗口会被 WM 接管: 开发机上实测窗口被加了装饰、报了 1074x687 而不是
-    // 请求的 1024x600。要真正铺满屏幕, 需要在建窗口后发
-    // _NET_WM_STATE_FULLSCREEN (走 EWMH, 见 WARNING.md C-7)。
+    // 板上与开发机都是 LXDE/X11 (板上 WM 为 Openbox), 所以这个窗口会被 WM 接管:
+    // 开发机上实测窗口被加了装饰、报了 1074x687 而不是请求的 1024x600。
+    // 按 2026-10-18 的决定, 全屏交给 DE —— 应用侧只需按 EWMH 发
+    // _NET_WM_STATE_FULLSCREEN 请求 (或配 LXDE/Openbox 窗口规则), 不自己实现
+    // (见 workflow.md §2.2 / WARNING.md C-7)。
     const int win_w = windowed ? kBoardWidth : screen_w;
     const int win_h = windowed ? kBoardHeight : screen_h;
     std::printf("  窗口   : %dx%d%s\n", win_w, win_h,
-                windowed ? " (窗口模式)" : " (全屏)");
+                windowed ? " (窗口模式)" : " (按屏幕尺寸)");
 
     // -----------------------------------------------------------------------
     // LVGL 初始化
@@ -1062,13 +1900,14 @@ int gui_build()
         addMouseCursor();
     }
 
-    std::printf("  布局   : 深色工业风 —— 顶栏(品牌/状态灯/退出) + 内容区 + 分页底栏"
-                " (%d 页, 首页 %d 个按钮)\n",
+    std::printf("  布局   : 深色工业风 —— 顶栏(品牌/状态灯/设置/退出) + 内容区 + 分页底栏"
+                " (%d 页, 首页 %d 个信息源)\n",
                 countOf(kPages), kPages[static_cast<int>(Page::Home)].count);
     std::printf("\n交互:\n");
     std::printf("  点右上角【退出】   退出程序\n");
-    std::printf("  首页点【LED 调试】/【蜂鸣器 调试】/【外部无源蜂鸣器】 进对应调试页,\n");
-    std::printf("                    页内末位【返回】回首页\n");
+    std::printf("  点右上角【设置】   进设置页 (LED / 蜂鸣器 / 外部无源蜂鸣器调试入口)\n");
+    std::printf("  首页点【信息源 1..12】 进模块页, 页内【返回】回首页\n");
+    std::printf("  设置页点【LED 调试】/【蜂鸣器 调试】/【外部无源蜂鸣器】 进对应调试页\n");
     std::printf("  调试页里点按钮     单独控制板载 LED / 蜂鸣器 / 外部无源蜂鸣器\n");
     std::printf("  按 q / Esc        退出程序 (每一页都一样)\n");
     std::fflush(stdout);
@@ -1088,7 +1927,8 @@ int render()
     if (g_page_dirty) {
         g_page_dirty = false;
         buildPageButtons();
-        std::printf("切换到 %s (底栏 %d 个按钮)\n", kPages[static_cast<int>(g_page)].name,
+        refreshPageContent();
+        std::printf("切换到 %s (底栏 %d 个按钮)\n", pageName(),
                     kPages[static_cast<int>(g_page)].count);
         std::fflush(stdout);
     }
@@ -1097,6 +1937,9 @@ int render()
     //
     // X11 后端自己有两个定时器在读 X 事件 (显示 5 ms / 输入 1 ms), 这里只需要
     // 按 LVGL 给的间隔睡一下即可。
+    refreshJsonLabel();
+    refreshSensorFrameLabel();
+
     uint32_t idle = lv_timer_handler();
     if (idle == LV_NO_TIMER_READY || idle > kMaxSleepMs) {
         idle = kMaxSleepMs;

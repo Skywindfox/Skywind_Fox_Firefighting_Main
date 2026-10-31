@@ -17,8 +17,8 @@
 
 | # | 问题 | 说明 |
 |---|---|---|
-| 1 | **LVGL 版的 armhf 产物还没在板上实测过** | 只做到交叉编译验证（构建 0 警告、产物为 armv7 hard-float、`NEEDED` 为 libX11/libfreetype）。**上板先点一遍【退出】和底部按钮**，确认触摸坐标、中文显示、字体路径都对 |
-| 2 | **开发机上跑 GUI 中文会显示成方框** | 字体候选表里 6 条路径都是 Debian 布局，Fedora 上一条都不存在。临时绕开：`./build/deffire-gui-dev --font=/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc`。**板上不受影响**（`wqy-zenhei.ttc` 在候选表第一条） |
+| 1 | ~~**LVGL 版的 armhf 产物还没在板上实测过**~~ **已关闭（2026-10-18）** | 已上板验证通过（项目成员确认）；原记录保留用于追溯。后续回归仍按 [VERIFY-RUNBOOK.md](VERIFY-RUNBOOK.md) 执行 |
+| 2 | **开发机上跑 GUI 中文会显示成方框** | 字体候选表里 6 条路径都是 Debian 布局，Fedora 上一条都不存在。临时绕开：`./build/deffire-gui-dev --font=/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc`。**板上已验证中文正常**（`wqy-zenhei.ttc` 在候选表第一条） |
 | 3 | **界面中央那行大字仍是 `halloworld`** | 二进制已改名为 `deffire-gui-dev` / `deffire-dev`，但屏幕正中显示的文字是 `src/appgui/gui.cpp` 里的 `kText`，**有意保留未改**。要改只动那一个常量 |
 | 4 | **CMake 不自动扫描源文件** | 新增 `.cpp` 必须手动加到 `CMakeLists.txt`（`add_library` / `add_executable`），否则不会被编译 |
 | 5 | **`build.sh` 没有"运行"模式** | 删 Zig 路径时 `run` / `gui` 一并删了。跑控制台直接调二进制 `./build/deffire-dev`；开发机看窗口用 `./build/deffire-gui-dev --windowed` |
@@ -353,11 +353,13 @@ DE: LXDE     WM: Openbox     Resolution: 1024x600
 这就是为什么窗口不是直接铺满屏幕：
 
 - `lv_x11_window_create()` 建的是普通 X 窗口，**Openbox 会接管它**
-- 开发机上（同样是 WM 环境，Mutter）实测：请求 1024×600，实际拿到 **1074×687** ——
+- 开发机（LXDE/X11；早期在 Mutter 下也复现过）实测：请求 1024×600，实际拿到 **1074×687** ——
   WM 加了装饰，还改变了尺寸。板上 Openbox 行为类似，装饰更少但不为零。
 - 界面里的【退出】按钮和 `q`/`Esc` 仍然有效（WM 不会吞掉客户区内的点击）。
 
-**要真正全屏**，需要在建窗口之后发 EWMH 消息：
+**2026-10-18 决定：不自己实现真全屏，交给 DE。** 应用侧只需要在建窗口之后按 EWMH
+向 WM 发一条 `_NET_WM_STATE_FULLSCREEN` 请求（或在 LXDE/Openbox 里配窗口规则），
+是否铺满由 WM 决定；不需要自己算窗口坐标，也不需要造无边框窗口。
 
 ```c
 // 伪代码: 通过 XSendEvent 发 _NET_WM_STATE_FULLSCREEN
@@ -365,8 +367,8 @@ DE: LXDE     WM: Openbox     Resolution: 1024x600
 // 发送到 root window, 带 SubstructureRedirectMask | SubstructureNotifyMask
 ```
 
-**目前代码没有发这条消息**，所以板上多半会看到带标题栏的窗口。上板第一件事就是确认
-这一点，再决定要不要补这段。
+**代码里还没发这条请求**。落地后按 runbook §4.3 确认一次即可；如果 Openbox 不认，
+再考虑窗口规则或其它 DE 侧配置。
 
 **另一条可选路径**：LXDE 下也可以直接关掉 WM 再跑程序，但那样桌面上其他程序也会失去
 窗口管理——不推荐。
@@ -625,5 +627,5 @@ udevadm info -q property /dev/gpiochip0 | grep SUBSYSTEM   # 应当输出 gpio
 | 触摸内核认到但 X 不认 | X server 没加载 evdev/libinput 驱动 | 装 `xserver-xorg-input-libinput`，查 `/var/log/Xorg.0.log` |
 | `xdpyinfo: unable to open display ""` | ssh/串口会话里 `DISPLAY` 为空；Xorg 还带 `-auth` | `export DISPLAY=:0`，必要时设 `XAUTHORITY` |
 | 系统里没有 `gcc-arm-linux-gnu` | Fedora 不提供这个包名 | 本项目交叉编译走容器，不需要它 |
-| 全屏下 40/18/16 号字观感偏大 | 设计如此（`kBigFontPx` / `kSmallFontPx` / `kStatusFontPx`），板子 1024×600 | 改 `src/appgui/gui.cpp` 里这三个常量 |
+| 铺满时 40/18/16 号字观感偏大 | 设计如此（`kBigFontPx` / `kSmallFontPx` / `kStatusFontPx`），板子 1024×600 | 改 `src/appgui/gui.cpp` 里这三个常量 |
 | `#include <linux/...>` 交叉编译能用，`<X11/...>` 不能 | 前者是内核 UAPI（Zig 自带 611 个），后者是外部库 | 后者需要 sysroot，见 [B-6](#b-6-zig-不带任何-x11-头文件) |

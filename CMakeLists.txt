@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(FireControlApp
     VERSION 1.0.0
     DESCRIPTION "FireControlApp"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # 全局编译选项
@@ -35,13 +35,38 @@ elseif(CMAKE_CXX_COMPILER_TARGET MATCHES "arm|aarch64|mips|riscv")
 endif()
 
 # ---------------------------------------------------------------------------
+# cJSON (third_party) —— 最基础的 JSON 解析
+#
+# 源码随仓库提交 (third_party/cjson, 1.7.18, MIT), 不依赖系统 libcjson:
+#   - 开发机 Fedora 只有运行库, 没有头文件;
+#   - 板上 Debian 12 也得另装 libcjson-dev（否则没有头文件）;
+#   - 交叉编译还要在 armhf 镜像里再装一份, 版本容易漂。
+# 只有两个文件, 直接编进静态库最省事, 构建结果也可复现。
+#
+# 注意: cJSON 是 C 代码, 所以顶层 project() 要同时启用 C 和 CXX。
+# 第三方代码不参与本项目"零警告"的要求, 编译选项里加 -w。
+# ---------------------------------------------------------------------------
+add_library(cjson STATIC
+    third_party/cjson/cJSON.c
+)
+target_include_directories(cjson PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cjson
+)
+set_target_properties(cjson PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON
+)
+target_compile_options(cjson PRIVATE -w)
+
+# ---------------------------------------------------------------------------
 # 业务逻辑库
 #
 # 把逻辑放库里的好处: 主程序和单元测试链接同一份代码,
 # 而且这一层可以交叉编译到 armhf (不依赖任何平台特有库)。
 #
 # 目录分工:
-#   include/      对外头文件   (greeting.h / start.h / usetools.h / hardware_path.h)
+#   include/      对外头文件   (greeting.h / start.h / usetools.h / hardware_path.h / json_status.h)
 #   src/library/  静态库实现   → libfirecontrol.a
 #   src/source/   程序入口     (main.cpp)
 #   src/appgui/   界面实现     (gui.cpp 真界面 / gui_stub.cpp 无界面版)
@@ -53,10 +78,15 @@ add_library(firecontrol
     src/library/greeting.cpp
     src/library/usetools.cpp
     src/library/start.cpp
+    src/library/json_frame.cpp
+    src/library/json_status.cpp
 )
 target_include_directories(firecontrol PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+# cJSON 是实现细节 (json_status.h 不暴露 cJSON 类型), 所以 PRIVATE。
+# 静态库的 PRIVATE 依赖会以 LINK_ONLY 形式传给最终可执行文件, 不会漏链。
+target_link_libraries(firecontrol PRIVATE cjson)
 
 # start.cpp 的蜂鸣器发声线程用 pthread。glibc 2.34+ 已经把 pthread 并进 libc,
 # 但显式链接才不依赖那个细节(换 libc / 交叉工具链也稳)。
@@ -325,6 +355,16 @@ if(BUILD_TESTING)
         target_link_libraries(test_greeting PRIVATE firecontrol)
 
         add_test(NAME greeting COMMAND test_greeting)
+
+        add_executable(test_json_status tests/test_json_status.cpp)
+        target_link_libraries(test_json_status PRIVATE firecontrol)
+
+        add_test(NAME json_status COMMAND test_json_status)
+
+        add_executable(test_json_frame tests/test_json_frame.cpp)
+        target_link_libraries(test_json_frame PRIVATE firecontrol)
+
+        add_test(NAME json_frame COMMAND test_json_frame)
     endif()
 endif()
 
