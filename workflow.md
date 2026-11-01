@@ -26,7 +26,7 @@
 | 原生 GUI（开发机预览） | ✅ 六类页面正常 | 首页（12 个信息源）/ 设置 / 信息源 / LED / 蜂鸣器 / 外部蜂鸣器：切页、按钮派发、退出路径都实测过；JSON 文件热更新也实测过 |
 | 骨架重构（四阶段 + 单循环） | ✅ 原生实测 | 0 警告；主循环 910 次/秒（与重构前一致）；点【退出】→ `gui_teardown()` → 进程干净退出；`--help` 不崩。见 §2.1 |
 | GPIO 输入（libgpiod） | ⚠ 只有骨架 | 依赖链已配齐并交叉编译通过；**没有任何调用点**，板端也没验过（不知道开关量传感器接在哪个 gpiochip / 哪条线上）。**信息源页已改用串口字节流**，这条路留给将来真正的开关量输入，见 §2.3 |
-| JSON 解析（cJSON） | ✅ 原生构建 + 单测 | `temperature` / `fire_alarm` / `smoker_alarm` / `buzzer_alarm`（兼容旧的 `data`/`smoke`）；`test_json_status` 覆盖字段/类型/语法/空对象；字面量/文件来源已在控制台验证。见 §2.5 |
+| JSON 解析（cJSON） | ✅ 原生构建 + 单测 | `temperature` / `fire_state` / `smoke_state` / `buzzer_state` / `led_state`（旧名 `*_alarm` 作别名、旧 `data`/`smoke` 兼容）；`test_json_status` 覆盖字段/类型/语法/空对象；字面量/文件来源已在控制台验证。见 §2.5 |
 | 串口来源 | ✅ 原生构建 + 单测（伪终端） | `serial_source.cpp`：每路设备+波特率、poll 线程、断线每秒重连；`test_serial_source` 覆盖打开/帧/断线/非法波特率。**板上真串口待接**，见 §2.6 |
 | 全屏 | ✅ 方案已定（交给 DE） | 不自己实现；按 EWMH 向 LXDE/Openbox 提交 `_NET_WM_STATE_FULLSCREEN` 请求（或配窗口规则），见 §2.2 |
 | 测试策略 | ✅ 手工验收 | 硬件 / GUI / 触摸以 VERIFY-RUNBOOK 为准；`ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame` / `serial_source`） |
@@ -187,16 +187,18 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 
 ```text
 {"start":1} ...数据... {"end":1}
-{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}
+{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
 {"data":1,"smoke":1}          # 旧格式, 仍然认
 ```
 
 - `src/library/json_frame.cpp` 负责流式切帧：标记精确匹配、可处理半包、
   不完整帧丢弃、新 `start` 出现时从新帧重开、单帧上限 8 KB；
   `src/library/json_status.cpp` 只解析完整帧里的 payload。
-- `json_status.cpp` 认 6 个数字字段：`temperature`（浮点）、`fire_alarm`、
-  `smoker_alarm`、`buzzer_alarm`（0 = 正常 / 1 = 异常由模块定义，app 不做极性换算），
-  以及旧的 `data` / `smoke`。其它字段忽略。
+- `json_status.cpp` 认 5 个状态字段（名字同模块固件）：`temperature`（浮点）、
+  `fire_state`（0 无火/1 有火）、`smoke_state`（0 无烟/1 有烟）、
+  `buzzer_state`（0 灭/1 急促/2 缓慢/3 长响）、`led_state`（0 灭 … 7 红绿蓝轮转）；
+  旧名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作别名，旧的 `data`/`smoke` 也认。
+  其它字段忽略。蜂鸣器/LED 是模块自己驱动的状态机，app 只显示，不驱动本机硬件。
 - **字段全部可选**：缺字段不算错（对应 `has_xxx=false`），一个已知字段都没有才失败
   （`error="没有已知字段"`）；字段存在但不是数字才失败（如"temperature 不是数字"）。
   根节点不是对象、语法错误同样 `valid=false`。
@@ -217,7 +219,8 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 - 测试：`tests/test_json_status.cpp` + `tests/test_json_frame.cpp`；原生 `ctest` 4/4
   （含 §2.6 的串口测试）。
 - **还没做**报警判定/联动：帧进得来、完整帧看得见、五行填得上；但没有根据
-  `fire_alarm` / `smoker_alarm` / `temperature` 驱动蜂鸣器/LED，温度阈值也未定。
+  `fire_state` / `smoke_state` / `temperature` 驱动本机蜂鸣器/LED（模块侧状态只显示），
+  温度阈值也未定。
 - cJSON 静态编入产物：板上**不需要**装 `libcjson`/`libcjson-dev`，也不需要重建
   armhf 工具链镜像；正常 `./build.sh gui-armhf` 后把 `build-armhf/deffire-gui-dev`
   拷到板上即可（`Dockerfile.build-armhf` 已经 `COPY third_party/`）。
@@ -284,8 +287,8 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
    【刷新串口】+【应用设置】（原来的 GPIO 接口/线号 已去掉，见 §2.3）；
    中间五行是烟雾/火焰/温度/蜂鸣器/LED，下面是模块状态、收到的完整报文、预留。
    0=正常/1=异常由传感器模块定义，app 不做极性换算；五行来自 payload 的
-   `smoker_alarm` / `fire_alarm` / `temperature` / `buzzer_alarm`，LED 没有对应字段，
-   缺字段显示占位。**没有 12 路默认串口配置**——现场用 `FIRECONTROL_SERIAL_<N>` 或界面选。
+   `smoke_state` / `fire_state` / `temperature` / `buzzer_state` / `led_state`，
+   缺字段显示占位；蜂鸣器/LED 是模块侧状态机，app 只显示。**没有 12 路默认串口配置**——现场用 `FIRECONTROL_SERIAL_<N>` 或界面选。
    覆盖层使用 `kSensorBg` 等深蓝黑 + 细灰线 + 少量琥珀强调，不套用普通页的深色工业风。
 9. `q` / `Esc` 在每一页都是退出程序（板子是触摸屏，键盘只给开发机用）。
 

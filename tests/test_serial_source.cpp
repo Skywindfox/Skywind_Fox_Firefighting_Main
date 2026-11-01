@@ -101,7 +101,7 @@ int main()
 
     // 一个完整帧: 走串口读线程 → json_source_feed → 切帧 → json_parse
     const std::string frame =
-        R"({"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1})";
+        R"({"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":2,"led_state":3}{"end":1})";
     check(writeAll(master, frame), "往串口写一个完整帧");
     const bool got = waitUntil(
         [] { return firecontrol::json_status_for(kSource).has_frame; }, 3000);
@@ -110,9 +110,10 @@ int main()
     firecontrol::JsonStatus json = firecontrol::json_status_for(kSource);
     check(json.valid, "串口帧解析成功");
     check(json.has_temperature && json.temperature == 36.5, "temperature=36.5");
-    check(json.has_fire_alarm && json.fire_alarm == 1, "fire_alarm=1");
-    check(json.has_smoker_alarm && json.smoker_alarm == 0, "smoker_alarm=0");
-    check(json.has_buzzer_alarm && json.buzzer_alarm == 0, "buzzer_alarm=0");
+    check(json.has_fire_state && json.fire_state == 1, "fire_state=1");
+    check(json.has_smoke_state && json.smoke_state == 0, "smoke_state=0");
+    check(json.has_buzzer_state && json.buzzer_state == 2, "buzzer_state=2");
+    check(json.has_led_state && json.led_state == 3, "led_state=3");
     check(json.frame == frame, "完整帧原文保留");
 
     // 半帧: 不该发布, 补齐后应该出帧 (跨两次 read 的拼接)
@@ -121,7 +122,7 @@ int main()
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     check(firecontrol::json_status_for(kSource).revision == rev_before,
           "半帧没有发布");
-    check(writeAll(master, R"("fire_alarm":0}{"end":1})"), "补齐半帧");
+    check(writeAll(master, R"("fire_state":0}{"end":1})"), "补齐半帧");
     const bool merged = waitUntil(
         [] {
             return firecontrol::json_status_for(kSource).has_temperature &&

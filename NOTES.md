@@ -277,8 +277,12 @@ sudo reboot
   每个信息源各自保存一份选择（`g_sensor_cfg[12]`），**没有默认值**。
 - **中间卡片**：上卡是"接收：" + 烟雾/火焰/温度/蜂鸣器/LED 五行，每行三列
   （名称 / 值 / 状态）；下卡是"模块状态 / 收到的报文 / 预留"。
-  五行来自 payload：`smoker_alarm` / `fire_alarm` / `temperature` / `buzzer_alarm`，
-  LED 没有对应字段。缺字段显示 `--` / `待接入`；温度显示数值 + `阈值待定`。
+  五行来自 payload：`smoke_state` / `fire_state` / `temperature` / `buzzer_state` /
+  `led_state`。缺字段显示 `--` / `待接入`；温度显示数值 + `阈值待定`。
+
+- **LED 与蜂鸣器是模块侧状态机**：`buzzer_state`（灭/急促/缓慢/长响）和
+  `led_state`（灭/蓝闪/绿闪/红闪/蓝绿/蓝红/绿红/轮转）由模块自己驱动，app 只显示，
+  **不**用它们去驱动本机蜂鸣器/LED。
   收到完整帧后，报文行显示原始 `{"start":1}...{"end":1}`，长报文可滚动/换行。
 - **界面配色**：普通页仍是近黑+安全琥珀；信息源覆盖层改用深蓝灰底 + 琥珀/橙描边
   （`kSensorBg` / `kSensorPanel` / `kSensorLine` / `kSensorText`），只作用于接口页。
@@ -417,15 +421,23 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
 ### 8.1 JSON 状态
 
 `src/library/json_status.cpp` 用 **cJSON 1.7.18**（`third_party/cjson`，MIT）解析传感器模块
-上报的状态对象（字段名就是模块实际发送的字节）：
+上报的状态对象（字段名就是模块固件里的变量名）：
 
 ```json
-{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}
+{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
 ```
 
-- 认 6 个数字字段：**`temperature`**（浮点）、**`fire_alarm`**、**`smoker_alarm`**、
-  **`buzzer_alarm`**（0 = 正常 / 1 = 异常，由模块定义，app 不做极性换算）；
-  旧的 `data` / `smoke` 仍然认（内置示例帧、旧文件、老测试用）。
+| 字段 | 含义 |
+|---|---|
+| `temperature` | 温度值（浮点，单位由模块定，app 原样显示） |
+| `fire_state` | `0` 无火 / `1` 有火 |
+| `smoke_state` | `0` 无烟 / `1` 有烟 |
+| `buzzer_state` | `0` 灭 / `1` 急促（100 ms 响、100 ms 停）/ `2` 缓慢（500 ms）/ `3` 长响 |
+| `led_state` | 三色 LED 状态机：`0` 灭、`1` 蓝闪（仅烟）、`2` 绿闪（仅温）、`3` 红闪（仅火）、`4` 蓝↔绿（烟+温）、`5` 蓝↔红（烟+火）、`6` 绿↔红（温+火）、`7` 红→绿→蓝（三路全报） |
+
+- 旧协议名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作为**别名**仍然认（映射到
+  同一组状态字段）；旧的 `data` / `smoke` 也保留兼容（内置示例帧、旧文件、老测试用）。
+- 蜂鸣器/LED 是**模块自己驱动的状态机**，app 只显示，不重算、不驱动本机蜂鸣器/LED。
 - 字段**全部可选**：模块只发其中几个也算成功，缺的字段 `has_xxx=false`；
   一个已知字段都没有才失败（`error="没有已知字段"`）。
 - 字段存在但**不是数字**才失败，`error` 指明是哪个字段（如“temperature 不是数字”）。
@@ -436,7 +448,7 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
   2. `FIRECONTROL_JSON_FILE` 指定的文件；
   3. 当前目录的 `firecontrol.json`（存在才用；板上按 `cd ~/Desktop` 启动时就是它）；
   4. 内置示例帧
-     `{"start":1}{"temperature":25.5,"fire_alarm":0,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}`。
+     `{"start":1}{"temperature":25.5,"fire_state":0,"smoke_state":0,"buzzer_state":0,"led_state":0}{"end":1}`。
   5. **串口**（真实来源，见 §8.3）：界面里选设备/波特率，或 `FIRECONTROL_SERIAL_<N>`。
 
 默认文件是相对**当前工作目录**的；从别的目录启动就找不到它，用
@@ -444,7 +456,7 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
 - 来源是文件时，`status()` 每 200 ms 重读一次；只有值/错误变化才递增 `revision`，
   GUI 只在 `revision` 变化时重设标签，不会每帧触发重排。
 - 控制台在变化时打印 `--- JSON 状态 ---` + `完整报文: ...` + 这一帧里有的字段
-  （`temperature=36.5  fire_alarm=1  ...`，只打有的，不补 0）。
+  （`temperature=36.5  fire_state=1  ...`，只打有的，不补 0）。
 - 界面：内容区页名下面一行列出有的字段；失败显示 `JSON 未识别 (...)`。
   信息源页底部还有一行 `收到的报文：...`，只在收到完整帧后更新。
 
@@ -452,22 +464,22 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
 
 ```bash
 # 字面量 (完整帧)
-FIRECONTROL_JSON='{"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}' \
+FIRECONTROL_JSON='{"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}{"end":1}' \
   ./build/deffire-gui-dev
 
 # 文件（运行时追加/重写，界面 200 ms 内跟着变）
-echo '{"start":1}{"temperature":36.5,"fire_alarm":1}{"end":1}' > firecontrol.json
+echo '{"start":1}{"temperature":36.5,"fire_state":1,"led_state":2}{"end":1}' > firecontrol.json
 ./build/deffire-gui-dev
 
 # 串口: 板上直接填设备路径; 开发机上用 socat 造一对伪终端 (见 §8.3)
 socat -d -d pty,raw,echo=0 pty,raw,echo=0        # 输出两条 /dev/pts/N, M
 FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/deffire-gui-dev
 # 另一个终端往 /dev/pts/M 写帧:
-printf '%s' '{"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}' > /dev/pts/M
+printf '%s' '{"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}{"end":1}' > /dev/pts/M
 ```
 
-当前它**只是解析/显示**：还没有根据 `fire_alarm` / `smoker_alarm` / `temperature` 做报警
-判定或联动，也没有接真实传感器（串口层已就绪、待上板接线）。
+当前它**只是解析/显示**：还没有根据 `fire_state` / `smoke_state` / `temperature` 做报警
+判定或联动（蜂鸣器/LED 是模块侧状态机，app 只显示），板上真串口也待接。
 
 cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不会出现
 `libcjson.so`，板上不需要装 cJSON；按原来的“本机交叉编译 → 拷到板上”流程即可。
@@ -571,10 +583,10 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
   `FIRECONTROL_SERIAL_<N>` 指定的 `/dev/pts/…` 这种枚举不到的设备也会显示出来，
   不会被回落成"未选择"、更不会在下次点应用时被覆盖。
 - 模块状态显示真实状态：`未选择串口` / `已打开，等待数据` / `未打开：<原因>（每秒重连）`。
-- 接收卡五行接上真实字段：烟雾 ← `smoker_alarm`、火焰 ← `fire_alarm`、
-  温度 ← `temperature`、蜂鸣器 ← `buzzer_alarm`（0 = 正常 / 1 = 异常）；
-  **LED 没有对应字段**，保持"规则待定"占位。缺字段的行显示"待接入"，
-  温度只给数值 + "阈值待定"，不擅自判正常/异常。
+- 接收卡五行接上真实字段：烟雾 ← `smoke_state`（无烟/有烟）、火焰 ← `fire_state`
+  （无火/有火）、温度 ← `temperature`（数值 + "阈值待定"）、蜂鸣器 ← `buzzer_state`
+  （灭/急促/缓慢/长响）、LED ← `led_state`（灭/蓝闪/绿闪/红闪/蓝绿/蓝红/绿红/轮转）。
+  缺字段的行显示"待接入"；温度不擅自判正常/异常（阈值未定）。
 
 各项的设计取舍与踩过的坑在 [WARNING.md](WARNING.md)。
 ---
@@ -584,7 +596,7 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 | 项目 | 结果 |
 |---|---|
 | 原生构建 | 0 warning，`ctest` 4/4 |
-| JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖新四字段/旧 data+smoke/缺字段/类型错误/语法错误/尾部垃圾/没有已知字段 + 逐路 feed/reset；`test_json_frame` 覆盖分块到达、半包、不完整帧丢弃、新 start 重开、多帧；控制台已验证逐路文件；**板上真串口待接** |
+| JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖五个状态字段/别名/旧 data+smoke/缺字段/类型错误/语法错误/尾部垃圾/没有已知字段 + 逐路 feed/reset；`test_json_frame` 覆盖分块到达、半包、不完整帧丢弃、新 start 重开、多帧；控制台已验证逐路文件；**板上真串口待接** |
 | 串口来源 | `test_serial_source`（伪终端）覆盖打开/关闭、完整帧经串口解析、半帧拼接、断线检测、非法波特率、环境变量格式错误；**板上真串口待接** |
 | 原生 GUI | `deffire-gui-dev` 约 900 KB，1024×600 窗口正常；首页 12 个信息源、设置页、信息源页、LED / 蜂鸣器 / 外部蜂鸣器页的切页与按钮派发已实测（含文件 JSON 热更新） |
 | 容器镜像构建 | ✅ 通过（`bookworm-slim` + gcc-arm 12 + cmake 3.25.1） |
@@ -608,14 +620,14 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 - [x] ~~**填 12 组默认 GPIO 映射**~~ —— 传输方式确定为**字节流**后作废：接口页已改成
       "串口设备 + 波特率"，不再按 GPIO 端口/线号选。开关量输入的 `kGpioInputs` 仍是空表
       （见 workflow.md §2.3），与信息源页无关
-- [x] ~~**信息源页的数据行接真实数据**~~ —— 已接上 `temperature` / `fire_alarm` /
-      `smoker_alarm` / `buzzer_alarm`；LED 没有对应字段，保持占位
+- [x] ~~**信息源页的数据行接真实数据**~~ —— 已接上 `temperature` / `fire_state` /
+      `smoke_state` / `buzzer_state` / `led_state`（五个字段全部有出处）
 - [ ] **12 路串口的默认配置**：设备路径/波特率按现场接线填。启动时可用
       `FIRECONTROL_SERIAL_<N>`，或进信息源页右栏选完点【应用设置】；**不预置猜出来的值**
 - [ ] **板上接真串口验证**：一路跑通（`/dev/ttyS*` 或 USB 转串口）→ 半包/坏帧/拔线重连，
       以及断开后每秒重连、界面模块状态是否跟着变
-- [ ] **确定蜂鸣器/LED 联动规则**：蜂鸣器行现在显示模块给的 `buzzer_alarm` 值；
-      要不要根据它驱动板载蜂鸣器/LED 还没定。LED 行仍是 `--（规则待定）`
+- [ ] **要不要用模块状态驱动本机蜂鸣器/LED**：现在只显示 `buzzer_state` / `led_state`
+      （模块自己已经在响/闪）；如果本机也要跟着报警，再定映射规则
 - [ ] **确定温度阈值/单位**：温度显示数值 + "阈值待定"，单位是模块定还是 app 换算、
       多少度算异常，都还没定
 - [ ] **是否需要 app 主动发请求报文**：现在只接收、不应答；若模块改成"查询-应答"式，

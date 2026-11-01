@@ -43,8 +43,9 @@ e1c4964  docs: 添加会话交接快照 HANDOFF.md
 - 设置页收纳 LED / 蜂鸣器 / 外部无源蜂鸣器本地测试；
 - 信息源接口页：左侧 12 路列表、中间接收/报文卡片、右侧串口设备/波特率设置；
 - **每路一个独立串口**（字节流），后台 poll 线程读取，断线每秒自动重连；
-- 逐路 JSON 帧解析（不完整帧丢弃、半包拼接、坏帧后新 start 重开），payload 认
-  `temperature` / `fire_alarm` / `smoker_alarm` / `buzzer_alarm`（兼容旧 `data`/`smoke`）；
+- 逐路 JSON 帧解析（不完整帧丢弃、半包拼接、坏帧后新 start 重开），payload 认模块固件的
+  `temperature` / `fire_state` / `smoke_state` / `buzzer_state` / `led_state`
+  （兼容旧名 `*_alarm` 与旧 `data`/`smoke`）；
 - 外部无源蜂鸣器 GPIOA:6、板载 LED/蜂鸣器 sysfs 控制仍然保留。
 
 ---
@@ -97,17 +98,26 @@ CMake：
 - 一次 feed 可以切出多个完整帧。
 - 旧格式 `{"data":1,"smoke":1}`（无 start/end）仍然按整段 JSON 兼容。
 
-payload 字段（模块实际发送的，2026-11 确认）：
+payload 字段（模块固件的变量名，2026-11 用户给出）：
 
 ```json
-{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}
+{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
 ```
 
-- 全是数字；`temperature` 是浮点，三个 `*_alarm` 是 0/1（0 = 正常、1 = 异常）；
+| 字段 | 模块语义 |
+|---|---|
+| `temperature` | 温度（浮点；单位由模块定，app 原样显示） |
+| `fire_state` | 0 无火 / 1 有火 |
+| `smoke_state` | 0 无烟 / 1 有烟 |
+| `buzzer_state` | 0 灭 / 1 急促（100ms 响停）/ 2 缓慢（500ms）/ 3 长响 |
+| `led_state` | 三色灯：0 灭、1 蓝闪(烟)、2 绿闪(温)、3 红闪(火)、4 蓝绿(烟+温)、5 蓝红(烟+火)、6 绿红(温+火)、7 红绿蓝轮转(三路全报) |
+
+- 全是数字；蜂鸣器/LED 是**模块侧状态机**，app 只显示，不重算、不驱动本机蜂鸣器/LED；
 - 字段**可选**：缺的不算错（`has_xxx=false`）；一个已知字段都没有才失败
   （`error="没有已知字段"`）；
 - 字段存在但不是数字 → `valid=false`，`error` 指明字段名（如 "temperature 不是数字"）；
-- 旧的 `data` / `smoke` 仍然认（内置示例帧、旧文件、旧测试用）。
+- 旧名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作**别名**仍认；
+  旧的 `data` / `smoke` 也保留兼容。
 
 文件来源（测试用）：
 
@@ -161,11 +171,11 @@ JsonStatus json_status();           // 信息源 0，普通页 JSON 行用
 
 | 行 | 字段 | 显示 |
 |---|---|---|
-| 烟雾状态 | `smoker_alarm` | 值 `0`/`1` + `正常`/`异常` |
-| 火焰状态 | `fire_alarm` | 值 `0`/`1` + `正常`/`异常` |
+| 烟雾状态 | `smoke_state` | 值 `0`/`1` + `无烟`/`有烟` |
+| 火焰状态 | `fire_state` | 值 `0`/`1` + `无火`/`有火` |
 | 温度状态 | `temperature` | 数值（`%.1f`）+ `阈值待定` |
-| 蜂鸣器状态 | `buzzer_alarm` | 值 `0`/`1` + `正常`/`异常` |
-| LED状态 | 无字段 | `--` + `规则待定`（不猜） |
+| 蜂鸣器状态 | `buzzer_state` | 值 `0..3` + `灭`/`急促`/`缓慢`/`长响` |
+| LED状态 | `led_state` | 值 `0..7` + `灭`/`蓝闪`/`绿闪`/`红闪`/`蓝绿`/`蓝红`/`绿红`/`轮转` |
 
 缺字段的行显示 `--（待接入）`，不拿上一帧的旧值冒充当前值；温度只给数值 +
 "阈值待定"，不擅自判正常/异常。`g_sensor_values[5]` / `g_sensor_states[5]` 是
@@ -179,8 +189,9 @@ JsonStatus json_status();           // 信息源 0，普通页 JSON 行用
 
 - 传输方式：**字节流**，每路信息源一个独立串口设备。
 - **0 = 正常，1 = 异常**（模块定义），app 不做极性换算，也**没有**高有效/低有效选项。
-- payload 字段：`temperature` / `fire_alarm` / `smoker_alarm` / `buzzer_alarm`（全数字，
-  **可选**，缺字段不算错）；旧的 `data` / `smoke` 仍然认。
+- payload 字段：`temperature` / `fire_state` / `smoke_state` / `buzzer_state` / `led_state`
+  （全数字，**可选**，缺字段不算错）；旧名 `*_alarm` 与旧 `data`/`smoke` 仍然认。
+  蜂鸣器/LED 是模块侧状态机，app 只显示。
 - 设备清单**运行时枚举**（`serial_list_devices()` 扫 `/dev/tty*`），波特率标准清单
   （9600..921600）；**不预置任何设备路径/波特率**，也不猜 12 路默认映射。
 - 断线（EOF / 读错误）：关端口、记错误、`json_source_reset()`、**每秒重连**；
@@ -197,7 +208,7 @@ JsonStatus json_status();           // 信息源 0，普通页 JSON 行用
   权限、端口是否被 getty 占用；
 - 上板验证：一路跑通、半包/坏帧/拔线重连、界面模块状态是否跟着变；
 - 温度阈值/单位；
-- 蜂鸣器/LED 联动规则（LED 没有 payload 字段；蜂鸣器行只显示模块给的 `buzzer_alarm`）；
+- 要不要用模块给的 `buzzer_state` / `led_state` 去驱动本机蜂鸣器/LED（现在只显示）；
 - "打开了但长时间没有帧" / 格式错误怎么显示，还没定。
 
 ---
@@ -237,7 +248,7 @@ printf '%s' '<下面那条帧>' > /dev/pts/M
 单路完整帧示例：
 
 ```json
-{"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}
+{"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}{"end":1}
 ```
 
 上板：

@@ -17,7 +17,8 @@ namespace firecontrol
 namespace
 {
 constexpr const char *kSampleFrame =
-    R"({"start":1}{"temperature":25.5,"fire_alarm":0,"smoker_alarm":0,"buzzer_alarm":0}{"end":1})";
+    R"({"start":1}{"temperature":25.5,"fire_state":0,"smoke_state":0,)"
+    R"("buzzer_state":0,"led_state":0}{"end":1})";
 
 constexpr const char *kErrEmpty = "JSON 为空";
 constexpr const char *kErrFileOpen = "打不开 JSON 文件";
@@ -28,6 +29,11 @@ constexpr const char *kErrNoFields = "没有已知字段";
 constexpr const char *kErrDataNotNumber = "data 不是数字";
 constexpr const char *kErrSmokeNotNumber = "smoke 不是数字";
 constexpr const char *kErrTemperatureNotNumber = "temperature 不是数字";
+constexpr const char *kErrFireStateNotNumber = "fire_state 不是数字";
+constexpr const char *kErrSmokeStateNotNumber = "smoke_state 不是数字";
+constexpr const char *kErrBuzzerStateNotNumber = "buzzer_state 不是数字";
+constexpr const char *kErrLedStateNotNumber = "led_state 不是数字";
+// 旧字段名 (别名) 的类型错误分开写, 报错时能和实际发的键对上
 constexpr const char *kErrFireAlarmNotNumber = "fire_alarm 不是数字";
 constexpr const char *kErrSmokerAlarmNotNumber = "smoker_alarm 不是数字";
 constexpr const char *kErrBuzzerAlarmNotNumber = "buzzer_alarm 不是数字";
@@ -60,12 +66,14 @@ bool sameValues(const JsonStatus &a, const JsonStatus &b)
     return a.valid == b.valid && a.has_data == b.has_data &&
            a.has_smoke == b.has_smoke && a.data == b.data && a.smoke == b.smoke &&
            a.has_temperature == b.has_temperature && a.temperature == b.temperature &&
-           a.has_fire_alarm == b.has_fire_alarm && a.fire_alarm == b.fire_alarm &&
-           a.has_smoker_alarm == b.has_smoker_alarm &&
-           a.smoker_alarm == b.smoker_alarm &&
-           a.has_buzzer_alarm == b.has_buzzer_alarm &&
-           a.buzzer_alarm == b.buzzer_alarm && sameError(a.error, b.error) &&
-           a.has_frame == b.has_frame && a.frame == b.frame;
+           a.has_fire_state == b.has_fire_state && a.fire_state == b.fire_state &&
+           a.has_smoke_state == b.has_smoke_state &&
+           a.smoke_state == b.smoke_state &&
+           a.has_buzzer_state == b.has_buzzer_state &&
+           a.buzzer_state == b.buzzer_state &&
+           a.has_led_state == b.has_led_state && a.led_state == b.led_state &&
+           sameError(a.error, b.error) && a.has_frame == b.has_frame &&
+           a.frame == b.frame;
 }
 
 void publish(SourceState &src, JsonStatus next, bool force = false)
@@ -301,14 +309,26 @@ int json_parse(const char *text, JsonStatus *out)
         *value = static_cast<int>(item->valuedouble);
     };
 
+    // 同一个字段两个键名: 模块固件的名字优先, 旧协议名作别名兜底。
+    auto readIntFirst = [&](const char *name, const char *alias, bool *has, int *value,
+                            const char *name_error, const char *alias_error) {
+        readInt(name, has, value, name_error);
+        if (ok && !*has) {
+            readInt(alias, has, value, alias_error);
+        }
+    };
+
     readInt("data", &out->has_data, &out->data, kErrDataNotNumber);
     readInt("smoke", &out->has_smoke, &out->smoke, kErrSmokeNotNumber);
-    readInt("fire_alarm", &out->has_fire_alarm, &out->fire_alarm,
-            kErrFireAlarmNotNumber);
-    readInt("smoker_alarm", &out->has_smoker_alarm, &out->smoker_alarm,
-            kErrSmokerAlarmNotNumber);
-    readInt("buzzer_alarm", &out->has_buzzer_alarm, &out->buzzer_alarm,
-            kErrBuzzerAlarmNotNumber);
+    readIntFirst("fire_state", "fire_alarm", &out->has_fire_state, &out->fire_state,
+                 kErrFireStateNotNumber, kErrFireAlarmNotNumber);
+    readIntFirst("smoke_state", "smoker_alarm", &out->has_smoke_state,
+                 &out->smoke_state, kErrSmokeStateNotNumber,
+                 kErrSmokerAlarmNotNumber);
+    readIntFirst("buzzer_state", "buzzer_alarm", &out->has_buzzer_state,
+                 &out->buzzer_state, kErrBuzzerStateNotNumber,
+                 kErrBuzzerAlarmNotNumber);
+    readInt("led_state", &out->has_led_state, &out->led_state, kErrLedStateNotNumber);
 
     if (ok) {
         cJSON *temperature = cJSON_GetObjectItemCaseSensitive(root, "temperature");
@@ -330,7 +350,8 @@ int json_parse(const char *text, JsonStatus *out)
     // 不要假装 valid。
     const bool any_known =
         out->has_data || out->has_smoke || out->has_temperature ||
-        out->has_fire_alarm || out->has_smoker_alarm || out->has_buzzer_alarm;
+        out->has_fire_state || out->has_smoke_state || out->has_buzzer_state ||
+        out->has_led_state;
     if (!any_known) {
         return fail(kErrNoFields);
     }

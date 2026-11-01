@@ -43,37 +43,50 @@ int main()
     check(st.data == 1 && st.smoke == 1, "data=1, smoke=1");
     check(st.error == nullptr, "成功时没有错误");
 
-    // 传感器模块实际发的字段 (2026-11 加入)
-    check(parse(R"({"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":1})",
+    // 模块固件的五个字段 (字段名与固件变量一致)
+    check(parse(R"({"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":2,"led_state":4})",
                 &st),
-          "解析模块的四个字段");
+          "解析模块的五个字段");
     check(st.valid && st.has_temperature && st.temperature == 36.5,
           "temperature=36.5");
-    check(st.has_fire_alarm && st.fire_alarm == 1, "fire_alarm=1");
-    check(st.has_smoker_alarm && st.smoker_alarm == 0, "smoker_alarm=0");
-    check(st.has_buzzer_alarm && st.buzzer_alarm == 1, "buzzer_alarm=1");
+    check(st.has_fire_state && st.fire_state == 1, "fire_state=1 (有火)");
+    check(st.has_smoke_state && st.smoke_state == 0, "smoke_state=0 (无烟)");
+    check(st.has_buzzer_state && st.buzzer_state == 2, "buzzer_state=2 (缓慢)");
+    check(st.has_led_state && st.led_state == 4, "led_state=4 (蓝+绿)");
     check(!st.has_data && !st.has_smoke, "没有 data/smoke 也不算错");
 
+    // 旧协议名作别名: fire_alarm / smoker_alarm / buzzer_alarm
+    check(parse(R"({"fire_alarm":1,"smoker_alarm":1,"buzzer_alarm":3})", &st),
+          "旧字段名作别名仍可解析");
+    check(st.fire_state == 1 && st.smoke_state == 1 && st.buzzer_state == 3,
+          "别名映射到同一组状态字段");
+
+    // 固件名优先于别名
+    check(parse(R"({"fire_state":0,"fire_alarm":1})", &st), "两个键同时出现也能解析");
+    check(st.fire_state == 0, "fire_state 优先");
+
     // 整数温度 / 只有部分字段
-    check(parse(R"({"temperature":30,"fire_alarm":0})", &st), "整数温度可以解析");
+    check(parse(R"({"temperature":30,"fire_state":0})", &st), "整数温度可以解析");
     check(st.temperature == 30.0, "temperature=30");
-    check(st.has_fire_alarm && !st.has_smoker_alarm && !st.has_buzzer_alarm,
+    check(st.has_fire_state && !st.has_smoke_state && !st.has_buzzer_state &&
+              !st.has_led_state,
           "缺的字段 has_* 是 false, 不算失败");
 
     // 字段类型不对 → 失败, 并说明是哪个字段
-    check(!parse(R"({"temperature":"hot","fire_alarm":1})", &st),
+    check(!parse(R"({"temperature":"hot","fire_state":1})", &st),
           "temperature 是字符串时失败");
     check(!st.valid && st.error != nullptr &&
               std::string(st.error).find("temperature") != std::string::npos,
           "错误信息提到 temperature");
 
-    check(!parse(R"({"fire_alarm":"yes"})", &st), "fire_alarm 是字符串时失败");
+    check(!parse(R"({"fire_state":"yes"})", &st), "fire_state 是字符串时失败");
     check(!st.valid && st.error != nullptr &&
-              std::string(st.error).find("fire_alarm") != std::string::npos,
-          "错误信息提到 fire_alarm");
+              std::string(st.error).find("fire_state") != std::string::npos,
+          "错误信息提到 fire_state");
 
-    check(!parse(R"({"smoker_alarm":null})", &st), "smoker_alarm 是 null 时失败");
-    check(!parse(R"({"buzzer_alarm":"x"})", &st), "buzzer_alarm 类型不对时失败");
+    check(!parse(R"({"smoke_state":null})", &st), "smoke_state 是 null 时失败");
+    check(!parse(R"({"buzzer_state":"x"})", &st), "buzzer_state 类型不对时失败");
+    check(!parse(R"({"led_state":true})", &st), "led_state 是布尔时失败");
 
     // 旧格式的字段类型检查还在
     check(!parse(R"({"data":"1","smoke":1})", &st), "data 是字符串时失败");
@@ -105,7 +118,7 @@ int main()
     check(!st.valid, "尾部垃圾时 valid = false");
 
     // 原文保留 (用于界面/排查)
-    check(parse(R"({"temperature":2.5,"fire_alarm":0})", &st), "再次解析成功");
+    check(parse(R"({"temperature":2.5,"fire_state":0})", &st), "再次解析成功");
     check(std::string(st.raw).find("\"temperature\":2.5") != std::string::npos,
           "raw 保留最近一次输入");
 
@@ -113,17 +126,20 @@ int main()
     firecontrol::json_status_init();
     const firecontrol::JsonStatus s0 = firecontrol::json_status_for(0);
     check(s0.has_frame, "信息源 1 默认有完整帧 (内置示例)");
-    check(s0.valid && s0.has_temperature, "内置示例帧带 temperature");
+    check(s0.valid && s0.has_temperature && s0.has_fire_state && s0.has_led_state,
+          "内置示例帧带模块字段");
+
     const firecontrol::JsonStatus s1_empty = firecontrol::json_status_for(1);
     check(!s1_empty.has_frame, "信息源 2 未喂数据前没有完整帧");
 
     const char *source2_frame =
-        R"({"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1})";
+        R"({"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":0,"led_state":3}{"end":1})";
     check(firecontrol::json_source_feed(1, source2_frame,
                                         std::strlen(source2_frame)) == 1,
           "喂给信息源 2 一个完整帧");
     const firecontrol::JsonStatus s1 = firecontrol::json_status_for(1);
-    check(s1.has_frame && s1.valid && s1.temperature == 36.5 && s1.fire_alarm == 1,
+    check(s1.has_frame && s1.valid && s1.temperature == 36.5 && s1.fire_state == 1 &&
+              s1.led_state == 3,
           "信息源 2 的解析结果正确");
     check(firecontrol::json_status_for(0).frame == s0.frame,
           "信息源 1 不受信息源 2 影响");

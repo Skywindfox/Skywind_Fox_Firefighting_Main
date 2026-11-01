@@ -353,39 +353,47 @@ DISPLAY=:0 wmctrl -lG
 
 ### 4.4 JSON 帧 / 状态
 
-帧格式和 payload（字段名就是模块实际发送的字节）：
+帧格式和 payload（字段名、语义都来自模块固件）：
 
 ```text
 {"start":1} ...数据... {"end":1}
-{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}
+{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
 ```
 
-字段全数字、**都可选**；`temperature` 浮点，三个 `*_alarm` 是 0/1（0 正常 / 1 异常）。
-旧的 `data` / `smoke` 仍然认（内置示例帧就用它们，见下）。
+- `temperature` 浮点；`fire_state` / `smoke_state` 是 0/1（0 无、1 有）；
+- `buzzer_state`：0 灭 / 1 急促(100ms) / 2 缓慢(500ms) / 3 长响；
+- `led_state`：0 灭 / 1 蓝闪(烟) / 2 绿闪(温) / 3 红闪(火) / 4 蓝绿 / 5 蓝红 / 6 绿红 / 7 轮转；
+- 字段**都可选**；旧名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作别名仍认，
+  旧 `data`/`smoke` 也兼容。
 
 默认内置示例帧是
-`{"start":1}{"temperature":25.5,"fire_alarm":0,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}`。
-普通页内容区页名下面应显示 `JSON  温度=25.5  火焰=0  烟雾=0  蜂鸣=0`；信息源接口页的
-「收到的报文」卡片应显示上面那条完整帧；接收卡五行应显示
-烟雾 `0 正常` / 火焰 `0 正常` / 温度 `25.5 阈值待定` / 蜂鸣器 `0 正常` / LED `-- 规则待定`。
+`{"start":1}{"temperature":25.5,"fire_state":0,"smoke_state":0,"buzzer_state":0,"led_state":0}{"end":1}`。
+普通页内容区页名下面应显示 `JSON  温度=25.5  火焰=0  烟雾=0  蜂鸣=0  LED=0`；
+信息源接口页「收到的报文」应显示上面那条完整帧；接收卡五行应显示
+烟雾 `0 无烟` / 火焰 `0 无火` / 温度 `25.5 阈值待定` / 蜂鸣器 `0 灭` / LED `0 灭`。
 控制台在第一轮 `status()` 会打印：
 
 ```text
 --- JSON 状态 ---
   完整报文: {"start":1}{"temperature":25.5,...}{"end":1}
-  temperature=25.5  fire_alarm=0  smoker_alarm=0  buzzer_alarm=0
+  temperature=25.5  fire_state=0  smoke_state=0  buzzer_state=0  led_state=0
 ```
 
 | 场景 | 怎么触发 | 通过标准 |
 |---|---|---|
-| 默认示例 | 直接在 `~/Desktop` 启动 | 普通页列出四个字段；接口页“收到的报文”带 start/end；五行按上面对应 |
-| 完整帧字面量 | `FIRECONTROL_JSON='{"start":1}{"temperature":40,"fire_alarm":1}{"end":1}' DISPLAY=:0 ./deffire-gui-dev` | 普通页 温度=40.0 / 火焰=1；接口页报文匹配；火焰行显示 `1 异常` |
+| 默认示例 | 直接在 `~/Desktop` 启动 | 普通页列出五个字段；接口页“收到的报文”带 start/end；五行按上面对应 |
+| 完整帧字面量 | `FIRECONTROL_JSON='{"start":1}{"temperature":40,"fire_state":1,"buzzer_state":1,"led_state":3}{"end":1}' DISPLAY=:0 ./deffire-gui-dev` | 普通页 温度=40.0 / 火焰=1；火焰行 `1 有火`、蜂鸣器 `1 急促`、LED `3 红闪` |
+| 旧字段名 | `FIRECONTROL_JSON='{"start":1}{"fire_alarm":1,"smoker_alarm":1,"buzzer_alarm":2}{"end":1}'` | 别名被认：火焰 `1 有火`、烟雾 `1 有烟`、蜂鸣器 `2 缓慢` |
 | 不完整帧 | 先写 `{"start":1}{"temperature":3,` 启动 | **不发布**，接口页「收到的报文」显示"暂无"（或保留上一帧） |
-| 补齐后续 | 在上面文件里追加 `"fire_alarm":0}{"end":1}` | 200 ms 内出现完整帧，控制台打印一次 |
-| 坏帧后接新帧 | 写入 `{"start":1}{"temperature":9,{"start":1}{"temperature":2,"fire_alarm":0}{"end":1}` | 旧的不完整帧被忽略，只发布后一个完整帧 |
-| 非法 payload | `{"start":1}{"start":1}{"foo":1}{"end":1}`（只有未知字段） | 接口页报文显示，但报"没有已知字段"，程序不退出 |
+| 补齐后续 | 在上面文件里追加 `"fire_state":0}{"end":1}` | 200 ms 内出现完整帧，控制台打印一次 |
+| 坏帧后接新帧 | 写入 `{"start":1}{"temperature":9,{"start":1}{"temperature":2,"fire_state":0}{"end":1}` | 旧的不完整帧被忽略，只发布后一个完整帧 |
+| 非法 payload | `{"start":1}{"foo":1}{"end":1}`（只有未知字段） | 接口页报文显示，但报"没有已知字段"，程序不退出 |
 | 字段类型错 | `{"start":1}{"temperature":"hot"}{"end":1}` | 报"temperature 不是数字"，程序不退出 |
 | 逐路文件 | `FIRECONTROL_JSON_FILE_2=<完整帧文件>` 启动，进信息源 2 | 信息源 2 显示该帧；信息源 1/3 不显示它 |
+
+> 2026-11 原生实测（伪终端串口，`/dev/pts/N` @115200）：两帧交替喂入，五行分别显示
+> `0 无烟 / 1 有火 / 36.5 阈值待定 / 1 急促 / 3 红闪` 和
+> `1 有烟 / 0 无火 / 37.2 阈值待定 / 2 缓慢 / 5 蓝红`，与报文一致。
 
 ### 4.5 串口来源
 

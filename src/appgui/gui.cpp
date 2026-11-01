@@ -909,14 +909,17 @@ void refreshJsonLabel()
             text += temperature;
             text += "  ";
         }
-        if (json.has_fire_alarm) {
-            text += "火焰=" + std::to_string(json.fire_alarm) + "  ";
+        if (json.has_fire_state) {
+            text += "火焰=" + std::to_string(json.fire_state) + "  ";
         }
-        if (json.has_smoker_alarm) {
-            text += "烟雾=" + std::to_string(json.smoker_alarm) + "  ";
+        if (json.has_smoke_state) {
+            text += "烟雾=" + std::to_string(json.smoke_state) + "  ";
         }
-        if (json.has_buzzer_alarm) {
-            text += "蜂鸣=" + std::to_string(json.buzzer_alarm) + "  ";
+        if (json.has_buzzer_state) {
+            text += "蜂鸣=" + std::to_string(json.buzzer_state) + "  ";
+        }
+        if (json.has_led_state) {
+            text += "LED=" + std::to_string(json.led_state) + "  ";
         }
         if (json.has_data) {
             text += "data=" + std::to_string(json.data) + "  ";
@@ -1004,19 +1007,24 @@ void refreshSensorData(bool force = false)
     last_source = g_sensor_index;
     last_revision = json.revision;
 
-    auto alarmState = [](int value) { return value == 0 ? "正常" : "异常"; };
-    auto alarmColor = [](int value) { return value == 0 ? kSensorOk : kSensorAccent; };
+    // 烟雾/火焰: 0=无、1=有 (模块定义), app 只显示。
+    auto yesNoText = [](int value, const char *no, const char *yes) {
+        return value == 0 ? no : yes;
+    };
+    auto yesNoColor = [](int value) { return value == 0 ? kSensorOk : kSensorAccent; };
 
-    if (json.has_smoker_alarm) {
-        setSensorRow(0, true, std::to_string(json.smoker_alarm),
-                     alarmState(json.smoker_alarm), alarmColor(json.smoker_alarm));
+    if (json.has_smoke_state) {
+        setSensorRow(0, true, std::to_string(json.smoke_state),
+                     yesNoText(json.smoke_state, "无烟", "有烟"),
+                     yesNoColor(json.smoke_state));
     } else {
         setSensorRow(0, false, "", "待接入", kSensorDim);
     }
 
-    if (json.has_fire_alarm) {
-        setSensorRow(1, true, std::to_string(json.fire_alarm),
-                     alarmState(json.fire_alarm), alarmColor(json.fire_alarm));
+    if (json.has_fire_state) {
+        setSensorRow(1, true, std::to_string(json.fire_state),
+                     yesNoText(json.fire_state, "无火", "有火"),
+                     yesNoColor(json.fire_state));
     } else {
         setSensorRow(1, false, "", "待接入", kSensorDim);
     }
@@ -1030,15 +1038,29 @@ void refreshSensorData(bool force = false)
         setSensorRow(2, false, "", "待接入", kSensorDim);
     }
 
-    if (json.has_buzzer_alarm) {
-        setSensorRow(3, true, std::to_string(json.buzzer_alarm),
-                     alarmState(json.buzzer_alarm), alarmColor(json.buzzer_alarm));
+    // 蜂鸣器状态机: 0=灭 1=急促(100ms) 2=缓慢(500ms) 3=长响。
+    static const char *kBuzzerNames[] = {"灭", "急促", "缓慢", "长响"};
+    if (json.has_buzzer_state) {
+        const int value = json.buzzer_state;
+        const bool known = (value >= 0 && value <= 3);
+        setSensorRow(3, true, std::to_string(value), known ? kBuzzerNames[value] : "未知",
+                     value == 0 ? kSensorDim : kSensorAccent);
     } else {
         setSensorRow(3, false, "", "待接入", kSensorDim);
     }
 
-    // LED 没有 payload 字段, 规则也待定 —— 保持占位, 不猜。
-    setSensorRow(4, false, "", "规则待定", kSensorDim);
+    // 三色 LED 状态机: 0=灭, 1=蓝闪(烟), 2=绿闪(温), 3=红闪(火),
+    // 4=蓝绿(烟+温), 5=蓝红(烟+火), 6=绿红(温+火), 7=红绿蓝轮转(三路全报)。
+    static const char *kLedNames[] = {"灭",  "蓝闪", "绿闪", "红闪",
+                                      "蓝绿", "蓝红", "绿红", "轮转"};
+    if (json.has_led_state) {
+        const int value = json.led_state;
+        const bool known = (value >= 0 && value <= 7);
+        setSensorRow(4, true, std::to_string(value), known ? kLedNames[value] : "未知",
+                     value == 0 ? kSensorDim : kSensorAccent);
+    } else {
+        setSensorRow(4, false, "", "待接入", kSensorDim);
+    }
 }
 
 bool inStartupGrace()
