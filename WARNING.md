@@ -415,7 +415,7 @@ return useable_tools::write_File(Led_on_board_Path, "1");
 
 共同点：**这三个设错都不会编译失败、也不会运行时崩溃**，只会让界面或排查体验变差 —— 所以单独记一笔。
 
-### C-10. 串口来源的六个坑
+### C-10. 串口来源的几个坑
 
 1. **串口上的 JSON 是字节流，不能按行读。** `read()` 可能只返回半个帧，也可能一次返回多个帧
    —— 交给 `json_source_feed(index, buf, n)` 去拼，不要自己 `fgets`/按 `\n` 切。
@@ -430,6 +430,11 @@ return useable_tools::write_File(Led_on_board_Path, "1");
    （`sudo usermod -aG dialout $USER`），**重新登录**才生效 —— 和 D-9 的 gpiochip 是两回事。
 6. **枚举设备时别把"当前终端"当串口**：`/dev/tty`、`/dev/ttyprintk`、`/dev/tty0..N`
    （虚拟控制台）都不是串口；`serial_list_devices()` 已排除这几类。
+
+7. **同一个设备不要配给两路信息源**。`serial_configure()` 每次都会 `open()` 一次，
+   两路指向同一 `/dev/ttyX` 时，两路会**抢同一串字节**（谁先 `read` 谁拿走），
+   现象是两边都缺帧、数据交错。要一路总线带多个模块，得由模块端给报文加路号
+   再按路号分派 —— 现在的 payload 没有路号，所以按"每路一个设备"设计。
 
 顺带：**测试不需要真硬件** —— 用一对伪终端（`posix_openpt`，或 `socat pty,raw,echo=0`）
 就能覆盖打开/读帧/断线；`tests/test_serial_source.cpp` 就是这么做的。
