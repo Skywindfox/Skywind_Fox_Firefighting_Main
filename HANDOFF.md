@@ -11,17 +11,19 @@
 | 项 | 值 |
 |---|---|
 | 分支 | 只剩 `main`（本地/远端） |
-| 最新提交 | `d96d1a2` `docs: 更新仓库地址为 Skywind_Fox_Firefighting_Main` |
-| `main` = `origin/main` | `d96d1a2` |
-| 工作区 | 干净；`build/`、`build-armhf/` 已清空 |
+| 最新提交 | 本轮 `docs: 说明报文头/尾归属（app 不添加）+ 移除交接里的临时备注`（hash 见 `git log -1`） |
+| `main` = `origin/main` | 提交后本地领先 1 个提交；推送前用 `git log origin/main..main` 核一下 |
+| 工作区 | 干净；`build/` 已重建（本轮），`build-armhf/` 未生成 |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
-| 最近测试 | 清空构建目录前 `ctest` 3/3 通过 |
+| 最近测试 | 本轮重建后 `ctest` 3/3 通过 |
 
-最近两个提交：
+最近提交：
 
 ```text
-a4ccfd1 feat: cJSON 帧解析 + 12 路信息源接口页
-d96d1a2 docs: 更新仓库地址为 Skywind_Fox_Firefighting_Main
+本轮     docs: 说明报文头/尾归属（app 不添加）+ 移除交接里的临时备注
+e1c4964  docs: 添加会话交接快照 HANDOFF.md
+d96d1a2  docs: 更新仓库地址为 Skywind_Fox_Firefighting_Main
+a4ccfd1  feat: cJSON 帧解析 + 12 路信息源接口页
 ```
 
 ---
@@ -73,6 +75,12 @@ CMake：
 ```text
 {"start":1} ...数据... {"end":1}
 ```
+
+**报文头/尾归发送方（传感器模块），app 不添加**：`JsonFrameParser` 只做接收侧切帧
+（按精确字节找标记、start 之前的字节丢弃），从不写标记；app 里唯一自己产出的成品帧是
+内置示例帧 `kSampleFrame`（没配置来源时的占位，不是协议）。所以"模块自己已经带了报文
+头/尾"**不需要我们再补一步**，只需要解析器的标记字节与模块实际发送的一致 —— 这两个值
+现在写死为 `{"start":1}` / `{"end":1}`，尚未与模块实测比对（见 §5 未完成第 1 条）。
 
 - 标记按**精确字节**匹配；payload 字符串里不要出现这两个字面量。
 - `feed()` 可以分块；start/end 被拆到两个 chunk 也能拼上。
@@ -158,7 +166,12 @@ JsonStatus json_status();           // 信息源 0，普通页 JSON 行用
 
 ### 未完成
 
-- 12 路真实串口：设备路径、波特率、termios 读取线程、断线重连策略；
+- **模块报文的实际字节**：头/尾究竟是什么（现在写死 `{"start":1}` / `{"end":1}`），
+  以及传输方式是 GPIO 开关量（0/1，`gpio_read_value()`）还是字节流（串口/其它总线）
+  —— 接口页右栏选的是"端口 + 线号"，而 `json_source_feed()` 收的是 JSON 字节流，
+  两者之间**还缺一层**；`json_source_feed()` 至今**没有调用点**（【应用设置】只保存选择）；
+  若模块是"查询-应答"式，还需要 app 自己发请求报文（现在没有任何发送代码）；
+- 12 路真实串口（确认走字节流之后）：设备路径、波特率、termios 读取线程、断线重连策略；
 - 串口线程收到字节后调 `json_source_feed(index, data, len)`；
 - 断线重连调 `json_source_reset(index)`；
 - 12 组默认 GPIO 映射；
@@ -251,10 +264,12 @@ FIRECONTROL_JSON_FILE_2=/tmp/source2.json DISPLAY=:0 ./build/deffire-gui-dev --w
 
 ## 9. 下一步建议顺序
 
-1. 重新构建并跑一次 `ctest`，确认清空构建目录后仍能 3/3；
-2. 填 12 组默认 GPIO 映射到 `kDefaultSensorConfig`；
-3. 确定串口设备/波特率，加读取线程，调 `json_source_feed(index, ...)`；
-4. 定义 payload 字段（烟雾/火焰/温度…），把 `g_sensor_values[5]` 接上；
-5. 定温度阈值和蜂鸣器/LED 联动规则；
-6. 上板验证接口页、逐路串口、半包/坏帧/重连；
-7. 更新 `VERIFY-RUNBOOK.md` 的实测记录。
+1. ~~重新构建并跑一次 `ctest`~~（本轮已做：清空构建目录后重建，3/3 通过）；
+2. 向硬件/模块侧确认三件事：报文头/尾的实际字节、传输方式（字节流还是开关量）、
+   模块是纯上报还是"查询-应答"（后者要 app 发请求报文）；
+3. 填 12 组默认 GPIO 映射到 `kDefaultSensorConfig`；
+4. 确定串口设备/波特率，加读取线程，调 `json_source_feed(index, ...)`；
+5. 定义 payload 字段（烟雾/火焰/温度…），把 `g_sensor_values[5]` 接上；
+6. 定温度阈值和蜂鸣器/LED 联动规则；
+7. 上板验证接口页、逐路串口、半包/坏帧/重连；
+8. 更新 `VERIFY-RUNBOOK.md` 的实测记录。

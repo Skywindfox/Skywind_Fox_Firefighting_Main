@@ -197,6 +197,17 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 - 每个信息源有独立的 `JsonFrameParser` / `JsonStatus`；接口页「收到的报文」只显示
   当前信息源的完整帧，不再共享。串口读取线程接上后调
   `json_source_feed(index, data, len)`，index=0..11；断线重连调 `json_source_reset(index)`。
+- **报文头/尾归发送方（模块），app 只解析、不添加**：解析器丢弃 start 之前的字节、从不写
+  标记；app 自己唯一的成品帧是没配置来源时的内置示例帧（占位，不是协议）。所以"模块自带
+  头/尾"不需要我们在 app 里补一步 —— 要做的只有让 `json_frame.h` 的 `kFrameStart` /
+  `kFrameEnd` 等于模块实际发的字节。这两个值现在写死为 `{"start":1}` / `{"end":1}`，
+  **尚未与模块实测比对**；对不上会静默"暂无"（不报错）。
+- 文件来源接受整段 JSON、字节流必须带 start/end，这个不对称是**有意的**：文件内容天然有
+  消息边界，字节流没有，不靠分隔符切不出来。等模块协议定了二选一（用它的头/尾切，或由
+  传输层保证"一次读 = 一条报文"），不要两头都猜。
+- 接口层还缺一层：接口页选的是 GPIO 端口 + 线号（开关量 0/1，`gpio_read_value()`），
+  而 `json_source_feed()` 要的是 JSON 字节流；该函数目前**没有调用点**，"应用"只保存
+  选择。模块到底走字节流还是只有电平，仍待确认（见 §2.3、NOTES §8.2）。
 - 没接串口时的测试来源：信息源 1 用 `FIRECONTROL_JSON` / `FIRECONTROL_JSON_FILE` /
   `./firecontrol.json` / 内置帧；信息源 2..12 用可选的 `FIRECONTROL_JSON_FILE_<N>`。
 - 测试：`tests/test_json_status.cpp` + `tests/test_json_frame.cpp`；原生 `ctest` 3/3。
