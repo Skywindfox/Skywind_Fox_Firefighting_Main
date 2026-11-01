@@ -4,12 +4,14 @@
 #include <cstdint>   // uint64_t
 #include <cstdio>
 #include <cstdlib>   // getenv / strtol (蜂鸣器频率)
+#include <string>
 #include <pthread.h> // 蜂鸣器发声线程
 #include <time.h>    // clock_gettime / clock_nanosleep
 
 #include "greeting.h"
 #include "hardware_path.h"
 #include "json_status.h"
+#include "serial_source.h"
 #include "usetools.h"
 
 // ---------------------------------------------------------------------------
@@ -64,6 +66,10 @@ int cpp_start()
         render();  // 刷一帧界面
     }
 
+    // 串口读取线程要在拆界面之前停: 它会往 json_status 里写, 不该在退出过程中
+    // 还在读设备。
+    firecontrol::serial_stop();
+
     gui_teardown();
     return 0;
 }
@@ -76,12 +82,17 @@ int device_init()
 {
     std::printf("%s\n", firecontrol::greeting().c_str());
 
-    // 最基础的 JSON 状态: 目前解析 {"data":1,"smoke":1} 这种对象。
+    // JSON 状态: 解析传感器模块的 {"temperature":..,"fire_alarm":..,...};
+    // 旧的 {"data":1,"smoke":1} 仍然认。
     // 来源优先级见 json_status.h (环境变量字面量 > 文件 > 内置示例)。
     // 解析失败不阻断启动: status() 会把错误当成一种状态显示出来。
     firecontrol::json_status_init();
 
-    // TODO: 打开传感器 / 读配置文件 / 初始化数据结构。
+    // 串口来源: 每路一个独立设备。设备/波特率由界面选, 或用环境变量先配好:
+    //     FIRECONTROL_SERIAL_2="/dev/ttyS0:115200"
+    // 哪一路都没配也没关系 —— 线程空转, 什么都不做。
+    firecontrol::serial_apply_env();
+    firecontrol::serial_start();
 
     return 0;
 }
@@ -234,7 +245,30 @@ int status()
             std::printf("  完整报文: %s\n", json.frame.c_str());
         }
         if (json.valid) {
-            std::printf("  data=%d  smoke=%d\n", json.data, json.smoke);
+            // 只打这一帧里真的有的字段 (模块可能只发其中几个)。
+            std::string line = "  ";
+            if (json.has_temperature) {
+                char temperature[32] = {};
+                std::snprintf(temperature, sizeof temperature, "temperature=%.1f  ",
+                              json.temperature);
+                line += temperature;
+            }
+            if (json.has_fire_alarm) {
+                line += "fire_alarm=" + std::to_string(json.fire_alarm) + "  ";
+            }
+            if (json.has_smoker_alarm) {
+                line += "smoker_alarm=" + std::to_string(json.smoker_alarm) + "  ";
+            }
+            if (json.has_buzzer_alarm) {
+                line += "buzzer_alarm=" + std::to_string(json.buzzer_alarm) + "  ";
+            }
+            if (json.has_data) {
+                line += "data=" + std::to_string(json.data) + "  ";
+            }
+            if (json.has_smoke) {
+                line += "smoke=" + std::to_string(json.smoke) + "  ";
+            }
+            std::printf("%s\n", line.c_str());
         } else {
             std::printf("  未识别: %s\n", json.error != nullptr ? json.error : "未知错误");
         }

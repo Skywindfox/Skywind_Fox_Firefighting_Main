@@ -25,10 +25,11 @@
 | 板上实测（LVGL 版） | ✅ 已上板验证通过 | 2026-10-18 项目成员确认；判据见 runbook §3–§4，具体日志/证据建议回填 §5 |
 | 原生 GUI（开发机预览） | ✅ 六类页面正常 | 首页（12 个信息源）/ 设置 / 信息源 / LED / 蜂鸣器 / 外部蜂鸣器：切页、按钮派发、退出路径都实测过；JSON 文件热更新也实测过 |
 | 骨架重构（四阶段 + 单循环） | ✅ 原生实测 | 0 警告；主循环 910 次/秒（与重构前一致）；点【退出】→ `gui_teardown()` → 进程干净退出；`--help` 不崩。见 §2.1 |
-| GPIO 输入（libgpiod） | ⚠ 只有骨架 | 依赖链已配齐并交叉编译通过；**没有任何调用点**，板端也没验过（不知道传感器接在哪个 gpiochip / 哪条线上）。后续做成可扩展注册表，见 §2.3 |
-| JSON 解析（cJSON） | ✅ 原生构建 + 单测 | `{"data":1,"smoke":1}` 解析、错误处理已通过 `test_json_status`；字面量/文件来源已在控制台验证；板上 UI 与文件热更新待验证。见 §2.5 |
+| GPIO 输入（libgpiod） | ⚠ 只有骨架 | 依赖链已配齐并交叉编译通过；**没有任何调用点**，板端也没验过（不知道开关量传感器接在哪个 gpiochip / 哪条线上）。**信息源页已改用串口字节流**，这条路留给将来真正的开关量输入，见 §2.3 |
+| JSON 解析（cJSON） | ✅ 原生构建 + 单测 | `temperature` / `fire_alarm` / `smoker_alarm` / `buzzer_alarm`（兼容旧的 `data`/`smoke`）；`test_json_status` 覆盖字段/类型/语法/空对象；字面量/文件来源已在控制台验证。见 §2.5 |
+| 串口来源 | ✅ 原生构建 + 单测（伪终端） | `serial_source.cpp`：每路设备+波特率、poll 线程、断线每秒重连；`test_serial_source` 覆盖打开/帧/断线/非法波特率。**板上真串口待接**，见 §2.6 |
 | 全屏 | ✅ 方案已定（交给 DE） | 不自己实现；按 EWMH 向 LXDE/Openbox 提交 `_NET_WM_STATE_FULLSCREEN` 请求（或配窗口规则），见 §2.2 |
-| 测试策略 | ✅ 手工验收 | 硬件 / GUI / 触摸以 VERIFY-RUNBOOK 为准；`ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame`） |
+| 测试策略 | ✅ 手工验收 | 硬件 / GUI / 触摸以 VERIFY-RUNBOOK 为准；`ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame` / `serial_source`） |
 
 ---
 
@@ -76,11 +77,16 @@ main.cpp（收命令行参数 + 定义程序级全局量 g_quit / g_argc / g_arg
 **当前状态**：方案已定，代码/DE 侧还没落地这个请求；下次上板按 runbook §4.3
 确认一次"发请求后是否铺满"即可。详见 WARNING C-7。
 
-### 2.3 传感器模块（0%，但有骨架）
+### 2.3 传感器模块：开关量输入（libgpiod，暂存）
 
-代码量还是 0。现在只有一条通道：`useable_tools::gpio_read_value()`（libgpiod v1），
-依赖链已配齐 —— `armhf-toolchain/Dockerfile` 里装了 `libgpiod-dev:armhf`（1.6.3，v1），
+**传输方式已定（2026-11）：模块走串口字节流，见 §2.6。** 这一节讲的是另一条通道：
+接在 GPIO 上的**开关量**输入（0/1 电平），给"只有电平、没有报文"的探测器预留。
+现在代码量还是 0。`useable_tools::gpio_read_value()`（libgpiod v1）依赖链已配齐 ——
+`armhf-toolchain/Dockerfile` 里装了 `libgpiod-dev:armhf`（1.6.3，v1），
 CMake 用 `WITH_GPIOD`（默认 AUTO）控制，见 NOTES.md §6。
+
+> 信息源页右栏原来的"GPIO 接口 / 线号"下拉已经去掉（那是开关量接法，和字节流不是一回事）；
+> 页面现在选的是"串口设备 + 波特率"。`kGpioInputs` 仍是空表，等真有开关量探测器再接。
 
 **只支持 v1 API**：`gpiod_chip_open_by_label` / `gpiod_line_request_input` 这套在
 **v2 里被删了**。容器与板子（Debian 12）是 1.6.3 = v1，可用；**Fedora 44 是 2.2.5 = v2**，
@@ -174,48 +180,71 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 `~/下载/` 里那份官方 `main.c` 用的是"综合例程扩展板"的 GPIO 配置（3 个 LED、蜂鸣器走
 `EV_SND`），**和手上这块底板不是一回事** —— 可以看它怎么调 libgpiod，但引脚编号别照抄。
 
-### 2.5 JSON 状态（2026-10-31，最基础）
+### 2.5 JSON 状态（2026-10-31 起，2026-11 扩字段）
 
 引入了 **cJSON 1.7.18**（`third_party/cjson`，MIT，随仓库提交，板上不需要另装
-`libcjson-dev`），解析传感器帧里的最小状态对象：
+`libcjson-dev`），解析传感器帧里的状态对象：
 
 ```text
 {"start":1} ...数据... {"end":1}
-{"data":1,"smoke":1}
+{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}
+{"data":1,"smoke":1}          # 旧格式, 仍然认
 ```
 
 - `src/library/json_frame.cpp` 负责流式切帧：标记精确匹配、可处理半包、
   不完整帧丢弃、新 `start` 出现时从新帧重开、单帧上限 8 KB；
   `src/library/json_status.cpp` 只解析完整帧里的 payload。
-- `json_status.cpp` 只认 payload 根对象里的 `data` / `smoke`，且必须是数字；
-  其它字段忽略。根节点不是对象、缺字段、类型不对、语法错误都会返回
-  `valid=false` 和一条静态 `error`。
+- `json_status.cpp` 认 6 个数字字段：`temperature`（浮点）、`fire_alarm`、
+  `smoker_alarm`、`buzzer_alarm`（0 = 正常 / 1 = 异常由模块定义，app 不做极性换算），
+  以及旧的 `data` / `smoke`。其它字段忽略。
+- **字段全部可选**：缺字段不算错（对应 `has_xxx=false`），一个已知字段都没有才失败
+  （`error="没有已知字段"`）；字段存在但不是数字才失败（如"temperature 不是数字"）。
+  根节点不是对象、语法错误同样 `valid=false`。
 - 数据来源优先级：`FIRECONTROL_JSON` 字面量 > `FIRECONTROL_JSON_FILE` 文件 >
-  当前目录 `firecontrol.json`（存在才用）> 内置示例帧。
+  当前目录 `firecontrol.json`（存在才用）> 内置示例帧 > **串口**（§2.6，真实来源）。
 - 文件来源每 200 ms 检查一次：内容没变不重复喂；追加只喂新增后缀；重写则重置解析器；
   之前在帧模式但重写内容没有 `start` 时保留上一帧，按不完整处理。
 - 每个信息源有独立的 `JsonFrameParser` / `JsonStatus`；接口页「收到的报文」只显示
-  当前信息源的完整帧，不再共享。串口读取线程接上后调
-  `json_source_feed(index, data, len)`，index=0..11；断线重连调 `json_source_reset(index)`。
+  当前信息源的完整帧，不再共享。串口线程调 `json_source_feed(index, data, len)`，
+  index=0..11；断线重连调 `json_source_reset(index)`。
 - **报文头/尾归发送方（模块），app 只解析、不添加**：解析器丢弃 start 之前的字节、从不写
   标记；app 自己唯一的成品帧是没配置来源时的内置示例帧（占位，不是协议）。所以"模块自带
   头/尾"不需要我们在 app 里补一步 —— 要做的只有让 `json_frame.h` 的 `kFrameStart` /
   `kFrameEnd` 等于模块实际发的字节。这两个值现在写死为 `{"start":1}` / `{"end":1}`，
   **尚未与模块实测比对**；对不上会静默"暂无"（不报错）。
 - 文件来源接受整段 JSON、字节流必须带 start/end，这个不对称是**有意的**：文件内容天然有
-  消息边界，字节流没有，不靠分隔符切不出来。等模块协议定了二选一（用它的头/尾切，或由
-  传输层保证"一次读 = 一条报文"），不要两头都猜。
-- 接口层还缺一层：接口页选的是 GPIO 端口 + 线号（开关量 0/1，`gpio_read_value()`），
-  而 `json_source_feed()` 要的是 JSON 字节流；该函数目前**没有调用点**，"应用"只保存
-  选择。模块到底走字节流还是只有电平，仍待确认（见 §2.3、NOTES §8.2）。
-- 没接串口时的测试来源：信息源 1 用 `FIRECONTROL_JSON` / `FIRECONTROL_JSON_FILE` /
-  `./firecontrol.json` / 内置帧；信息源 2..12 用可选的 `FIRECONTROL_JSON_FILE_<N>`。
-- 测试：`tests/test_json_status.cpp` + `tests/test_json_frame.cpp`；原生 `ctest` 3/3。
-- **还没接**串口/网络/真实传感器，也没有根据 `smoke` 做报警判定 —— 这一步只是把
-  "帧进得来、完整帧看得见"打通。
+  消息边界，字节流没有，不靠分隔符切不出来。
+- 测试：`tests/test_json_status.cpp` + `tests/test_json_frame.cpp`；原生 `ctest` 4/4
+  （含 §2.6 的串口测试）。
+- **还没做**报警判定/联动：帧进得来、完整帧看得见、五行填得上；但没有根据
+  `fire_alarm` / `smoker_alarm` / `temperature` 驱动蜂鸣器/LED，温度阈值也未定。
 - cJSON 静态编入产物：板上**不需要**装 `libcjson`/`libcjson-dev`，也不需要重建
   armhf 工具链镜像；正常 `./build.sh gui-armhf` 后把 `build-armhf/deffire-gui-dev`
   拷到板上即可（`Dockerfile.build-armhf` 已经 `COPY third_party/`）。
+
+### 2.6 串口来源（2026-11）
+
+**传输方式定为字节流**：每路信息源一个独立串口设备（不是 GPIO 开关量）。
+实现：`include/serial_source.h` + `src/library/serial_source.cpp`。
+
+- 一路一条记录：设备路径 + 波特率。设备清单**运行时枚举**
+  （`serial_list_devices()` 扫 `/dev/tty*`，排除 `/dev/tty`、`/dev/ttyprintk`、
+  虚拟控制台 `/dev/tty0..N`），波特率是标准值清单
+  （9600/19200/38400/57600/115200/230400/460800/921600）。**不预置任何默认值。**
+- 打开：`O_RDWR | O_NOCTTY | O_NONBLOCK` + `cfmakeraw` + 8N1 + `CLOCAL|CREAD`。
+- **一个后台线程** `poll()` 所有已打开端口，读到字节就
+  `json_source_feed(index, buf, n)` —— 不开 12 个线程（单核 A7）。
+- 断线（EOF / 读错误）：关 fd、状态记一条错误、`json_source_reset(index)`，
+  **每秒**重连；重连成功同样 reset（旧流半帧作废）。控制台/界面状态都跟着变。
+- 无界面配置：`FIRECONTROL_SERIAL_<N>="<device>:<baud>"`（N = 1..12）；
+  格式不对只报一行、不崩。
+- 退出：`cpp_start()` 在 `gui_teardown()` **之前**调 `serial_stop()`（关端口 + join 线程）。
+- 界面：右栏「串口设备 / 波特率 / 【刷新串口】/【应用设置】」；原来的"GPIO 接口 / 线号"
+  已去掉（见 §2.3）。两个下拉都选了才打开；有一个没选 = 取消配置并关端口。
+- 测试：`tests/test_serial_source.cpp` 用伪终端 (`posix_openpt`) 冒充串口，
+  覆盖打开/关闭、完整帧、半帧、断线检测、非法波特率、环境变量格式错误；
+  原生 `ctest` 4/4，交叉编译时跳过。
+- **板上待验证**：真串口路径/波特率、`dialout` 权限、拔线重连、长时间无帧。
 
 ---
 
@@ -247,14 +276,16 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
    记录硬件响应全靠它（runbook §4.2 的验收表按这个格式写的）。
 7. `kText = "halloworld"` 是**有意保留**的（WARNING A-3）。内容区那行小字显示"页名 ·
    上一步结果"，也别删 —— 板上不接控制台时它是唯一的操作反馈。下面那行
-   `JSON  data = ...    smoke = ...` 是 `json_status` 的解析结果，同样保留
-   （失败时显示"未识别"）。
+   `JSON  温度=...  火焰=...  ...` 是 `json_status` 的解析结果（只列有的字段），
+   同样保留（失败时显示"未识别"）。
 8. **信息源页是独立全屏覆盖层**：`g_sensor_page` 只在 `Page::Sensor` 显示，盖住普通页的
    顶栏/底栏。布局是「顶栏(品牌/首页/退出) + 左侧 12 个信息源按钮 + 中间接收/模块状态
-   卡片 + 右侧信息源设置」。左侧切换模块；右侧 GPIO/线号下拉 + 占位 + 应用设置；
+   卡片 + 右侧信息源设置」。左侧切换模块；右侧是**串口设备 + 波特率** 下拉 +
+   【刷新串口】+【应用设置】（原来的 GPIO 接口/线号 已去掉，见 §2.3）；
    中间五行是烟雾/火焰/温度/蜂鸣器/LED，下面是模块状态、收到的完整报文、预留。
-   0=正常/1=异常由传感器模块定义，app 不做极性换算；温度/蜂鸣器/LED 规则未定前显示
-   占位符。12 组默认 GPIO 映射集中在 `kDefaultSensorConfig[12]`，未提供前保持未配置。
+   0=正常/1=异常由传感器模块定义，app 不做极性换算；五行来自 payload 的
+   `smoker_alarm` / `fire_alarm` / `temperature` / `buzzer_alarm`，LED 没有对应字段，
+   缺字段显示占位。**没有 12 路默认串口配置**——现场用 `FIRECONTROL_SERIAL_<N>` 或界面选。
    覆盖层使用 `kSensorBg` 等深蓝黑 + 细灰线 + 少量琥珀强调，不套用普通页的深色工业风。
 9. `q` / `Esc` 在每一页都是退出程序（板子是触摸屏，键盘只给开发机用）。
 

@@ -9,17 +9,36 @@ namespace firecontrol
     // 信息源数量: 12 个模块, 每个模块一路独立输入。
     inline constexpr int kInfoSourceCount = 12;
 
-    // 最基础的 JSON 状态 —— 目前只认两个数字字段:
+    // 传感器模块上报的状态对象。模块实际发送的字段名就是下面这些, 全是数字:
     //
-    //     {"data":1,"smoke":1}
+    //     {"temperature":36.5,"fire_alarm":0,"smoker_alarm":1,"buzzer_alarm":0}
+    //
+    // 旧的 {"data":1,"smoke":1} 仍然认 (内置示例帧/旧文件还在用)。
+    //
+    // 字段都是**可选**的: 缺哪个 has_* 就是 false, 不算解析失败 —— 模块可能只发
+    // 它有的那几个。至少认出 1 个字段才算成功; 一个都没有则 error="没有已知字段"。
+    // 字段存在但类型不对(不是数字)才算失败。
     //
     // 解析失败时 valid=false, error 指向一条静态说明; raw 保留最近一次 payload。
     struct JsonStatus {
         bool valid = false;
+
+        // 旧格式 {"data":1,"smoke":1} (保留兼容)
         bool has_data = false;
         bool has_smoke = false;
         int data = 0;
         int smoke = 0;
+
+        // 传感器模块的四个字段。0 = 正常 / 1 = 异常 由模块定义, app 不做极性换算。
+        bool has_temperature = false;
+        double temperature = 0.0;  // 单位由模块定, app 原样显示
+        bool has_fire_alarm = false;
+        int fire_alarm = 0;
+        bool has_smoker_alarm = false;
+        int smoker_alarm = 0;
+        bool has_buzzer_alarm = false;
+        int buzzer_alarm = 0;
+
         const char *error = nullptr;  // 静态字符串; nullptr = 没有错误
         unsigned revision = 0;        // 值/完整帧变化时递增
         char raw[256] = {};           // 最近一次 payload 原文 (可能被截断)
@@ -30,7 +49,8 @@ namespace firecontrol
         std::string frame;
     };
 
-    // 解析一段 JSON 文本。成功返回 0, 失败 -1 (out->error 说明原因)。
+    // 解析一段 JSON 文本。成功(认出至少一个已知字段)返回 0, 失败 -1
+    // (out->error 说明原因: 语法错误 / 根不是对象 / 字段类型不对 / 没有已知字段)。
     int json_parse(const char *text, JsonStatus *out);
 
     // 从文件读取并解析 (不经过 start/end 切帧, 给测试/旧格式用)。

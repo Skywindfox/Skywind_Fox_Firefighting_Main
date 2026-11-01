@@ -17,17 +17,20 @@ namespace firecontrol
 namespace
 {
 constexpr const char *kSampleFrame =
-    R"({"start":1}{"data":1,"smoke":1}{"end":1})";
+    R"({"start":1}{"temperature":25.5,"fire_alarm":0,"smoker_alarm":0,"buzzer_alarm":0}{"end":1})";
 
 constexpr const char *kErrEmpty = "JSON 为空";
 constexpr const char *kErrFileOpen = "打不开 JSON 文件";
 constexpr const char *kErrFileRead = "读 JSON 文件失败";
 constexpr const char *kErrSyntax = "JSON 语法错误";
 constexpr const char *kErrNotObject = "根节点不是对象";
-constexpr const char *kErrNoData = "缺少 data";
-constexpr const char *kErrNoSmoke = "缺少 smoke";
+constexpr const char *kErrNoFields = "没有已知字段";
 constexpr const char *kErrDataNotNumber = "data 不是数字";
 constexpr const char *kErrSmokeNotNumber = "smoke 不是数字";
+constexpr const char *kErrTemperatureNotNumber = "temperature 不是数字";
+constexpr const char *kErrFireAlarmNotNumber = "fire_alarm 不是数字";
+constexpr const char *kErrSmokerAlarmNotNumber = "smoker_alarm 不是数字";
+constexpr const char *kErrBuzzerAlarmNotNumber = "buzzer_alarm 不是数字";
 
 // 每个信息源一路独立输入。串口读取线程调 json_source_feed() 喂字节,
 // 文件来源 (测试用) 也走同一套 parser/status。
@@ -56,8 +59,13 @@ bool sameValues(const JsonStatus &a, const JsonStatus &b)
 {
     return a.valid == b.valid && a.has_data == b.has_data &&
            a.has_smoke == b.has_smoke && a.data == b.data && a.smoke == b.smoke &&
-           sameError(a.error, b.error) && a.has_frame == b.has_frame &&
-           a.frame == b.frame;
+           a.has_temperature == b.has_temperature && a.temperature == b.temperature &&
+           a.has_fire_alarm == b.has_fire_alarm && a.fire_alarm == b.fire_alarm &&
+           a.has_smoker_alarm == b.has_smoker_alarm &&
+           a.smoker_alarm == b.smoker_alarm &&
+           a.has_buzzer_alarm == b.has_buzzer_alarm &&
+           a.buzzer_alarm == b.buzzer_alarm && sameError(a.error, b.error) &&
+           a.has_frame == b.has_frame && a.frame == b.frame;
 }
 
 void publish(SourceState &src, JsonStatus next, bool force = false)
@@ -273,26 +281,60 @@ int json_parse(const char *text, JsonStatus *out)
         return fail(kErrNotObject);
     }
 
-    cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-    if (data == nullptr) {
-        return fail(kErrNoData);
+    // 已知字段全是可选的: 缺字段不算错 (模块可能只发它有的那几个),
+    // 存在但不是数字才算失败。
+    bool ok = true;
+    auto readInt = [&](const char *name, bool *has, int *value, const char *type_error) {
+        if (!ok) {
+            return;
+        }
+        cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+        if (item == nullptr) {
+            return;
+        }
+        if (!cJSON_IsNumber(item)) {
+            out->error = type_error;
+            ok = false;
+            return;
+        }
+        *has = true;
+        *value = static_cast<int>(item->valuedouble);
+    };
+
+    readInt("data", &out->has_data, &out->data, kErrDataNotNumber);
+    readInt("smoke", &out->has_smoke, &out->smoke, kErrSmokeNotNumber);
+    readInt("fire_alarm", &out->has_fire_alarm, &out->fire_alarm,
+            kErrFireAlarmNotNumber);
+    readInt("smoker_alarm", &out->has_smoker_alarm, &out->smoker_alarm,
+            kErrSmokerAlarmNotNumber);
+    readInt("buzzer_alarm", &out->has_buzzer_alarm, &out->buzzer_alarm,
+            kErrBuzzerAlarmNotNumber);
+
+    if (ok) {
+        cJSON *temperature = cJSON_GetObjectItemCaseSensitive(root, "temperature");
+        if (temperature != nullptr) {
+            if (!cJSON_IsNumber(temperature)) {
+                out->error = kErrTemperatureNotNumber;
+                ok = false;
+            } else {
+                out->has_temperature = true;
+                out->temperature = temperature->valuedouble;
+            }
+        }
     }
-    if (!cJSON_IsNumber(data)) {
-        return fail(kErrDataNotNumber);
+    if (!ok) {
+        return fail(out->error);
     }
 
-    cJSON *smoke = cJSON_GetObjectItemCaseSensitive(root, "smoke");
-    if (smoke == nullptr) {
-        return fail(kErrNoSmoke);
-    }
-    if (!cJSON_IsNumber(smoke)) {
-        return fail(kErrSmokeNotNumber);
+    // 一个已知字段都没有: 帧收到了但里面没有能用的数据, 明确报出来,
+    // 不要假装 valid。
+    const bool any_known =
+        out->has_data || out->has_smoke || out->has_temperature ||
+        out->has_fire_alarm || out->has_smoker_alarm || out->has_buzzer_alarm;
+    if (!any_known) {
+        return fail(kErrNoFields);
     }
 
-    out->data = static_cast<int>(data->valuedouble);
-    out->smoke = static_cast<int>(smoke->valuedouble);
-    out->has_data = true;
-    out->has_smoke = true;
     out->valid = true;
     out->error = nullptr;
 

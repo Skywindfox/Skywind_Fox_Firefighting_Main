@@ -50,12 +50,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "json_status.h"
+#include "serial_source.h"
 #include "start.h"  // led_on / led_off (板载 sys-led)
 
 namespace {
@@ -73,42 +76,16 @@ constexpr int kSensorCount = 12;
 static_assert(kSensorCount == firecontrol::kInfoSourceCount,
               "UI 信息源数量必须与 json_status 的 kInfoSourceCount 一致");
 
-// GPIO 控制器: 板上 gpiodetect 的 label 是 GPIOA..GPIOI。
-// 线数来自 2026-09-19 板上 gpioinfo 实测: GPIOH 15 条, GPIOI 8 条, 其余 16 条。
-// GPIOE 没有在当时的快照里单独列出, 按 16 条预留; 真正接线前以 gpiodetect/gpioinfo 为准。
-constexpr const char *kGpioPorts[] = {
-    "GPIOA", "GPIOB", "GPIOC", "GPIOD", "GPIOE",
-    "GPIOF", "GPIOG", "GPIOH", "GPIOI",
-};
-constexpr int kGpioPortCount =
-    static_cast<int>(sizeof(kGpioPorts) / sizeof(kGpioPorts[0]));
-
-constexpr int gpioLineCount(int port_index)
-{
-    if (port_index == 7) {  // GPIOH
-        return 15;
-    }
-    if (port_index == 8) {  // GPIOI
-        return 8;
-    }
-    return 16;
-}
-
-// 每个信息源的默认 GPIO 配置。顺序对应首页的"信息源 1..12"。
-// port 是 kGpioPorts 的下标, -1 表示**还没提供默认映射**。
+// 信息源的传输方式: **每路一个独立串口设备** (设备路径 + 波特率), 数据是 JSON
+// 字节流, 由 serial_source.cpp 的后台线程读进来、交给 json_source_feed() 切帧。
 //
-// 项目成员会提供 12 组实际默认映射; 在拿到之前全部留 -1,
-// 界面显示"未配置", 由用户在 app 内手动选 —— 不猜引脚。
-struct DefaultSensorConfig {
-    int port;
-    int line;
-};
-
-constexpr DefaultSensorConfig kDefaultSensorConfig[kSensorCount] = {
-    {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
-    {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
-    {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
-};
+// 设备清单在运行时用 serial_list_devices() 枚举, 波特率用 serial_baud_rates();
+// **这里不预置任何设备路径/波特率**, 也不猜 12 路默认映射 —— 用户在右栏选,
+// 或者用 FIRECONTROL_SERIAL_<N>="/dev/ttyX:115200" 指定。
+//
+// 原来的"GPIO 接口 + 线号"下拉已经去掉: 那是**开关量**输入 (gpio_read_value,
+// 0/1 电平) 的接法, 而模块给的是字节流, 两套东西不能混。板上那些开关量输入的
+// 接线表仍在 start.cpp 的 kGpioInputs 里, 与本页无关。
 
 // 字号 (像素)
 constexpr uint32_t kBigFontPx = 40;     // 主标题
@@ -393,12 +370,13 @@ constexpr ButtonSpec kQuitButton = {"退出", true, Action::Nothing};
 // 顶栏右侧的小【设置】。本地测试入口都在设置页里, 首页留给 12 个信息源。
 constexpr ButtonSpec kSettingsButton = {"设置", true, Action::SettingsPage};
 
-// 信息源页的【应用】: 只保存 GPIO/线号选择, 不读硬件。
+// 信息源页的【应用】: 打开这一路选好的串口 (设备 + 波特率)。
 // 信息源接口页 (覆盖层) 的顶栏/设置按钮。
 constexpr ButtonSpec kOverlayHome = {"首页", true, Action::BackToHome};
 constexpr ButtonSpec kOverlayQuit = {"退出应用", true, Action::Nothing};
 constexpr ButtonSpec kOverlayApply = {"应用设置", true, Action::Nothing};
-constexpr ButtonSpec kOverlayPlaceholder = {"占位", false, Action::Nothing};
+// 原来预留的"占位"按钮: 串口是运行时可插拔的, 需要一个"重新枚举"的入口。
+constexpr ButtonSpec kOverlayRefreshSerial = {"刷新串口", true, Action::Nothing};
 
 // 一个页面 = 一组底栏按钮 + 页名 + **本页每行放几个**。
 //
@@ -558,13 +536,14 @@ unsigned g_json_revision = 0;      // 已经显示过的 JsonStatus::revision
 lv_obj_t *g_generic_content = nullptr;
 lv_obj_t *g_sensor_page = nullptr;
 lv_obj_t *g_sensor_title = nullptr;
-lv_obj_t *g_sensor_port_dd = nullptr;
-lv_obj_t *g_sensor_line_dd = nullptr;
+lv_obj_t *g_sensor_device_dd = nullptr;  // 串口设备下拉
+lv_obj_t *g_sensor_baud_dd = nullptr;    // 波特率下拉
 lv_obj_t *g_sensor_status = nullptr;
 
-// 数据项的值标签, 顺序: 烟雾 / 火焰 / 温度 / 蜂鸣器状态 / LED 状态。
-// 现在只显示默认值/占位符; 以后数据源接上后改这些标签即可。
+// 数据项: 顺序 烟雾 / 火焰 / 温度 / 蜂鸣器 / LED, 每行一个"值"标签 + 一个"状态"标签。
+// 值来自 json_status_for(当前信息源); 没有对应字段的行显示占位, 不显示假数据。
 lv_obj_t *g_sensor_values[5] = {};
+lv_obj_t *g_sensor_states[5] = {};
 
 // 最近一次收到的完整帧 (含 {"start":1} / {"end":1}), 显示在信息源页。
 lv_obj_t *g_sensor_frame_label = nullptr;
@@ -574,13 +553,12 @@ int g_sensor_frame_source = -1;
 // 接口页左侧的 12 个信息源按钮; 用来高亮当前选中的模块。
 lv_obj_t *g_sensor_side_buttons[kSensorCount] = {};
 
-// 每个信息源模块各自的 GPIO 选择。现在只保存 UI 选择, 不读硬件 ——
-// "已应用"只表示用户确认了 GPIO/线号, 不表示数据已经接上。
-// 0 = 正常、1 = 异常由传感器模块那边定义, app 这边不再做极性换算。
+// 每个信息源各自保存的串口选择 (设备路径 + 波特率)。真正打开/断线重连由
+// serial_source.cpp 的后台线程负责; 这里只记 UI 的选择, 用来回填下拉框。
+// 0 = 正常、1 = 异常由传感器模块那边定义, app 这边不做极性换算。
 struct SensorConfig {
-    int port = -1;      // kGpioPorts 下标; -1 = 未配置
-    int line = -1;      // 线号; -1 = 未配置
-    bool applied = false;
+    std::string device;  // 空 = 未选择
+    int baud = 0;        // 0 = 未选择
 };
 SensorConfig g_sensor_cfg[kSensorCount];
 
@@ -631,106 +609,140 @@ void refreshPageLabel()
     }
 }
 
-// 生成端口下拉选项 (GPIOA\nGPIOB\n...)。和 kGpioPorts 保持同一顺序。
-void buildPortOptions(char *buf, size_t size)
+// ---------------------------------------------------------------------------
+// 串口选择 (设备 / 波特率)
+//
+// 设备清单在运行时枚举 (插了哪个口就列哪个), 波特率是标准值清单; 两者都以
+// "未选择"打头, **没有默认值** —— 不猜模块接在哪个口、跑多少波特率。选完点
+// 【应用设置】才真正去打开, 打开结果由 serial_source.cpp 记状态。
+// ---------------------------------------------------------------------------
+
+// 设备下拉的选项文本 (LVGL dropdown 要 \n 分隔): "未选择\n/dev/ttyS0\n..."
+std::string buildDeviceOptions()
 {
-    if (buf == nullptr || size == 0) {
-        return;
+    std::string options = "未选择";
+    for (const std::string &device : firecontrol::serial_list_devices()) {
+        options += '\n';
+        options += device;
     }
-    size_t used = 0;
-    for (int i = 0; i < kGpioPortCount; i++) {
-        const int n = std::snprintf(buf + used, size - used, i == 0 ? "%s" : "\n%s",
-                                    kGpioPorts[i]);
-        if (n < 0) {
-            break;
-        }
-        const size_t add = static_cast<size_t>(n);
-        if (add >= size - used) {
-            used = size - 1;
-            break;
-        }
-        used += add;
-    }
-    buf[used < size ? used : size - 1] = '\0';
+    return options;
 }
 
-// 生成某个 GPIO 控制器的线号选项 (0..N-1)。
-// LVGL 的 dropdown 需要一段以 \n 分隔的文本; 64 字节足够放 0..15。
-void buildLineOptions(int port_index, char *buf, size_t size)
+std::string buildBaudOptions()
 {
-    if (buf == nullptr || size == 0) {
-        return;
+    std::string options = "未选择";
+    for (const int baud : firecontrol::serial_baud_rates()) {
+        options += '\n';
+        options += std::to_string(baud);
     }
-    const int count = gpioLineCount(port_index);
-    size_t used = 0;
-    for (int i = 0; i < count; i++) {
-        const int n = std::snprintf(buf + used, size - used, i == 0 ? "%d" : "\n%d", i);
-        if (n < 0) {
-            break;
-        }
-        const size_t add = static_cast<size_t>(n);
-        if (add >= size - used) {
-            used = size - 1;
-            break;
-        }
-        used += add;
-    }
-    buf[used < size ? used : size - 1] = '\0';
+    return options;
 }
 
-// 切换端口后重建线号下拉框, 并把选择退回 0 —— 不同控制器的线数不同
-// (GPIOH 15, GPIOI 8, 其余 16), 不能留着上一条端口的线号。
-void updateLineOptions(int port_index)
+// 下拉框下标 <-> 实际值。0 一律表示"未选择"。
+int deviceIndexOf(const std::string &device)
 {
-    if (g_sensor_line_dd == nullptr) {
-        return;
+    if (device.empty()) {
+        return 0;
     }
-    char options[64] = {};
-    buildLineOptions(port_index, options, sizeof options);
-    lv_dropdown_set_options(g_sensor_line_dd, options);
-    lv_dropdown_set_selected(g_sensor_line_dd, 0);
+    const std::vector<std::string> devices = firecontrol::serial_list_devices();
+    for (std::size_t i = 0; i < devices.size(); i++) {
+        if (devices[i] == device) {
+            return static_cast<int>(i) + 1;
+        }
+    }
+    return 0;
 }
 
-// 用代码里的默认表初始化 12 个模块。默认映射有效 = 已配置;
-// 还没有提供映射 (-1) 的模块保持"未配置", 等用户在 app 内选。
+std::string deviceAt(int selected)
+{
+    if (selected <= 0) {
+        return {};
+    }
+    const std::vector<std::string> devices = firecontrol::serial_list_devices();
+    const std::size_t index = static_cast<std::size_t>(selected - 1);
+    return index < devices.size() ? devices[index] : std::string();
+}
+
+int baudIndexOf(int baud)
+{
+    const std::vector<int> &rates = firecontrol::serial_baud_rates();
+    for (std::size_t i = 0; i < rates.size(); i++) {
+        if (rates[i] == baud) {
+            return static_cast<int>(i) + 1;
+        }
+    }
+    return 0;
+}
+
+int baudAt(int selected)
+{
+    if (selected <= 0) {
+        return 0;
+    }
+    const std::vector<int> &rates = firecontrol::serial_baud_rates();
+    const std::size_t index = static_cast<std::size_t>(selected - 1);
+    return index < rates.size() ? rates[index] : 0;
+}
+
+// 从 serial_source 的当前配置回填 12 路的选择 (FIRECONTROL_SERIAL_<N> 在
+// device_init 里已经先配过一次)。没配置的保持"未选择", 不猜设备/波特率。
 void initSensorDefaults()
 {
     for (int i = 0; i < kSensorCount; i++) {
-        const DefaultSensorConfig &def = kDefaultSensorConfig[i];
+        const firecontrol::SerialState state = firecontrol::serial_state(i);
         SensorConfig &cfg = g_sensor_cfg[i];
-        cfg.port = def.port;
-        cfg.line = def.line;
-        cfg.applied = (cfg.port >= 0 && cfg.port < kGpioPortCount &&
-                       cfg.line >= 0 && cfg.line < gpioLineCount(cfg.port));
+        cfg.device = state.configured ? state.device : std::string();
+        cfg.baud = state.configured ? state.baud : 0;
     }
 }
 
-// 模块状态: 只描述"选择"到哪一步, 不假装数据已经接上。
-// 0 = 正常 / 1 = 异常 由传感器模块定义, 这里不做极性换算。
+// 模块状态: 说清楚串口现在到底开没开 —— 不假装数据已经进来。
 void updateSensorStatus()
 {
     if (g_sensor_status == nullptr) {
         return;
     }
 
-    const SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
-    const bool valid = cfg.applied && cfg.port >= 0 && cfg.port < kGpioPortCount &&
-                       cfg.line >= 0 && cfg.line < gpioLineCount(cfg.port);
-    if (!valid) {
-        lv_label_set_text(g_sensor_status, "未配置");
+    const firecontrol::SerialState state = firecontrol::serial_state(g_sensor_index);
+    if (!state.configured) {
+        lv_label_set_text(g_sensor_status, "未选择串口（选好设备/波特率后点【应用设置】）");
         lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorDim), 0);
         return;
     }
 
-    lv_label_set_text_fmt(g_sensor_status, "已选择 %s:%d（等待数据接入）",
-                          kGpioPorts[cfg.port], cfg.line);
+    if (state.opened) {
+        lv_label_set_text_fmt(g_sensor_status, "%s @ %d（已打开，等待数据）",
+                              state.device.c_str(), state.baud);
+        lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorOk), 0);
+        return;
+    }
+
+    // 没打开: 原因原样带出来 (打开失败 / 设备已断开), 并说明会自动重连。
+    lv_label_set_text_fmt(g_sensor_status, "%s @ %d 未打开：%s（每秒重连）",
+                          state.device.c_str(), state.baud,
+                          state.error.empty() ? "未知原因" : state.error.c_str());
     lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorAccent), 0);
+}
+
+// 每帧看一眼串口状态, 只在 serial_state().revision 变了才重设标签 ——
+// 否则每帧 set_text 会让 LVGL 一直重排布局。
+void refreshSensorStatus()
+{
+    static unsigned last_revision = ~0u;
+    static int last_source = -1;
+
+    const firecontrol::SerialState state = firecontrol::serial_state(g_sensor_index);
+    if (last_source == g_sensor_index && last_revision == state.revision) {
+        return;
+    }
+    last_source = g_sensor_index;
+    last_revision = state.revision;
+    updateSensorStatus();
 }
 
 // 下拉框改了但还没点【应用】: 明确告诉用户"有未应用的更改"。
 void markSensorDirty()
 {
-    g_sensor_cfg[g_sensor_index].applied = false;
     if (g_sensor_status != nullptr) {
         lv_label_set_text(g_sensor_status, "有未应用的更改");
         lv_obj_set_style_text_color(g_sensor_status, lv_color_hex(kSensorAccent), 0);
@@ -738,6 +750,7 @@ void markSensorDirty()
 }
 
 void refreshSensorFrameLabel(bool force);
+void refreshSensorData(bool force);
 
 // 左侧信息源按钮的选中态: 当前模块描边加粗、底色提亮。
 void refreshSidebarSelection()
@@ -761,33 +774,46 @@ void refreshSidebarSelection()
 }
 
 // 把当前模块保存的选择填回控件。切页 / 首次进入模块页时调用。
-// 没配置时控件先落在 GPIOA:0, 但状态仍是"未配置" —— 不把默认显示当成已保存。
+// 没选过就停在"未选择"; 不把下拉框里显示的第一个值当成已保存。
 void loadSensorControls()
 {
-    if (g_sensor_port_dd == nullptr || g_sensor_line_dd == nullptr) {
+    if (g_sensor_device_dd == nullptr || g_sensor_baud_dd == nullptr) {
         return;
     }
 
     const SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
-    const int ui_port = (cfg.port >= 0 && cfg.port < kGpioPortCount) ? cfg.port : 0;
-    const int ui_line = (cfg.line >= 0 && cfg.line < gpioLineCount(ui_port)) ? cfg.line : 0;
-
     if (g_sensor_title != nullptr) {
         lv_label_set_text_fmt(g_sensor_title, "信息源 %d", g_sensor_index + 1);
     }
-    lv_dropdown_set_selected(g_sensor_port_dd, ui_port);
-    updateLineOptions(ui_port);
-    lv_dropdown_set_selected(g_sensor_line_dd, ui_line);
+
+    // 设备清单可能变过 (插拔), 每次进页都重建一遍再回填选择。
+    const std::string options = buildDeviceOptions();
+    lv_dropdown_set_options(g_sensor_device_dd, options.c_str());
+    lv_dropdown_set_selected(g_sensor_device_dd, deviceIndexOf(cfg.device));
+    lv_dropdown_set_selected(g_sensor_baud_dd, baudIndexOf(cfg.baud));
+
     updateSensorStatus();
     refreshSidebarSelection();
     refreshSensorFrameLabel(true);
+    refreshSensorData(true);
 }
 
-void onSensorPortChanged(lv_event_t *e)
+// 【刷新串口】: 重新枚举 /dev/tty*, 尽量保住当前选择。
+void onRefreshSerialList(lv_event_t *e)
 {
     LV_UNUSED(e);
-    updateLineOptions(lv_dropdown_get_selected(g_sensor_port_dd));
-    markSensorDirty();
+    if (g_sensor_device_dd == nullptr) {
+        return;
+    }
+
+    const std::string current = deviceAt(lv_dropdown_get_selected(g_sensor_device_dd));
+    const std::string options = buildDeviceOptions();
+    lv_dropdown_set_options(g_sensor_device_dd, options.c_str());
+    lv_dropdown_set_selected(g_sensor_device_dd, deviceIndexOf(current));
+
+    std::printf("串口列表已刷新 (%d 个设备)\n",
+                static_cast<int>(firecontrol::serial_list_devices().size()));
+    std::fflush(stdout);
 }
 
 void onSensorOptionChanged(lv_event_t *e)
@@ -796,29 +822,30 @@ void onSensorOptionChanged(lv_event_t *e)
     markSensorDirty();
 }
 
-// 【应用】只保存选择, 不读 GPIO —— 现在还没有"按信息源读硬件"的实现,
-// 不能在这里假装读到了一个值。状态里明确写"等待数据接入"。
+// 【应用设置】: 真正去打开这一路的串口。设备/波特率有一个没选 = 取消配置
+// (关闭端口)。打开结果由 serial_source 记状态, 这里只显示。
 void onApplySensorConfig(lv_event_t *e)
 {
     LV_UNUSED(e);
 
     SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
-    cfg.port = lv_dropdown_get_selected(g_sensor_port_dd);
-    cfg.line = lv_dropdown_get_selected(g_sensor_line_dd);
+    cfg.device = deviceAt(lv_dropdown_get_selected(g_sensor_device_dd));
+    cfg.baud = baudAt(lv_dropdown_get_selected(g_sensor_baud_dd));
 
-    if (cfg.port < 0 || cfg.port >= kGpioPortCount) {
-        cfg.port = 0;
+    const bool configured = !cfg.device.empty() && cfg.baud > 0;
+    const int rc = firecontrol::serial_configure(
+        g_sensor_index, configured ? cfg.device.c_str() : nullptr,
+        configured ? cfg.baud : 0);
+
+    if (configured) {
+        std::printf("信息源 %d 应用串口: %s @ %d (%s)\n", g_sensor_index + 1,
+                    cfg.device.c_str(), cfg.baud, rc == 0 ? "已打开" : "打开失败");
+    } else {
+        std::printf("信息源 %d 应用串口: 未选择（已取消配置）\n", g_sensor_index + 1);
     }
-    if (cfg.line < 0 || cfg.line >= gpioLineCount(cfg.port)) {
-        cfg.line = 0;
-    }
-
-    cfg.applied = true;
-    updateSensorStatus();
-
-    std::printf("信息源 %d 应用: %s:%d (仅保存选择, 未读硬件)\n",
-                g_sensor_index + 1, kGpioPorts[cfg.port], cfg.line);
     std::fflush(stdout);
+
+    updateSensorStatus();
 }
 
 // 内容区切换: 普通页显示 halloworld/JSON, 信息源页显示 GPIO 选项/数据/状态。
@@ -857,8 +884,31 @@ void refreshJsonLabel()
     g_json_revision = json.revision;
 
     if (json.valid) {
-        lv_label_set_text_fmt(g_json_label, "JSON  data = %d    smoke = %d", json.data,
-                              json.smoke);
+        // 只把这一帧里真的有的字段列出来 (模块可能只发其中几个)。
+        std::string text = "JSON  ";
+        if (json.has_temperature) {
+            char temperature[32] = {};
+            std::snprintf(temperature, sizeof temperature, "%.1f", json.temperature);
+            text += "温度=";
+            text += temperature;
+            text += "  ";
+        }
+        if (json.has_fire_alarm) {
+            text += "火焰=" + std::to_string(json.fire_alarm) + "  ";
+        }
+        if (json.has_smoker_alarm) {
+            text += "烟雾=" + std::to_string(json.smoker_alarm) + "  ";
+        }
+        if (json.has_buzzer_alarm) {
+            text += "蜂鸣=" + std::to_string(json.buzzer_alarm) + "  ";
+        }
+        if (json.has_data) {
+            text += "data=" + std::to_string(json.data) + "  ";
+        }
+        if (json.has_smoke) {
+            text += "smoke=" + std::to_string(json.smoke) + "  ";
+        }
+        lv_label_set_text(g_json_label, text.c_str());
         lv_obj_set_style_text_color(g_json_label, lv_color_hex(kColText), 0);
     } else {
         lv_label_set_text_fmt(g_json_label, "JSON  未识别 (%s)",
@@ -891,6 +941,88 @@ void refreshSensorFrameLabel(bool force = false)
         lv_label_set_text(g_sensor_frame_label, "暂无");
         lv_obj_set_style_text_color(g_sensor_frame_label, lv_color_hex(kSensorDim), 0);
     }
+}
+
+// 一行数据: 值 + 状态。present=false 时值显示 "--" (灰)。
+void setSensorRow(int row, bool present, const std::string &value,
+                  const std::string &state, uint32_t state_color)
+{
+    if (row < 0 || row >= 5) {
+        return;
+    }
+    if (g_sensor_values[row] != nullptr) {
+        lv_label_set_text(g_sensor_values[row], present ? value.c_str() : "--");
+        lv_obj_set_style_text_color(g_sensor_values[row],
+                                    lv_color_hex(present ? kSensorValue : kSensorDim), 0);
+    }
+    if (g_sensor_states[row] != nullptr) {
+        lv_label_set_text(g_sensor_states[row], state.c_str());
+        lv_obj_set_style_text_color(g_sensor_states[row], lv_color_hex(state_color), 0);
+    }
+}
+
+// 把当前信息源的解析结果填进接收卡五行。
+//
+// 字段对应 (模块只发这几个):
+//   烟雾状态   ← smoker_alarm
+//   火焰状态   ← fire_alarm
+//   温度状态   ← temperature
+//   蜂鸣器状态 ← buzzer_alarm
+//   LED状态    ← payload 里没有对应字段, 规则也还没定 → 保持占位
+//
+// 0 = 正常 / 1 = 异常 由模块定义, app 只按 0/非0 显示, 不做极性换算。
+// 缺字段的行显示"待接入"占位 —— 不拿上一帧的旧值冒充当前值。
+void refreshSensorData(bool force = false)
+{
+    if (g_sensor_values[0] == nullptr) {
+        return;
+    }
+
+    static unsigned last_revision = 0;
+    static int last_source = -1;
+
+    const firecontrol::JsonStatus json = firecontrol::json_status_for(g_sensor_index);
+    if (!force && last_source == g_sensor_index && last_revision == json.revision) {
+        return;
+    }
+    last_source = g_sensor_index;
+    last_revision = json.revision;
+
+    auto alarmState = [](int value) { return value == 0 ? "正常" : "异常"; };
+    auto alarmColor = [](int value) { return value == 0 ? kSensorOk : kSensorAccent; };
+
+    if (json.has_smoker_alarm) {
+        setSensorRow(0, true, std::to_string(json.smoker_alarm),
+                     alarmState(json.smoker_alarm), alarmColor(json.smoker_alarm));
+    } else {
+        setSensorRow(0, false, "", "待接入", kSensorDim);
+    }
+
+    if (json.has_fire_alarm) {
+        setSensorRow(1, true, std::to_string(json.fire_alarm),
+                     alarmState(json.fire_alarm), alarmColor(json.fire_alarm));
+    } else {
+        setSensorRow(1, false, "", "待接入", kSensorDim);
+    }
+
+    if (json.has_temperature) {
+        char temperature[32] = {};
+        std::snprintf(temperature, sizeof temperature, "%.1f", json.temperature);
+        // 阈值还没定: 给数值 + 明确写"阈值待定", 不擅自判正常/异常。
+        setSensorRow(2, true, temperature, "阈值待定", kSensorAccent);
+    } else {
+        setSensorRow(2, false, "", "待接入", kSensorDim);
+    }
+
+    if (json.has_buzzer_alarm) {
+        setSensorRow(3, true, std::to_string(json.buzzer_alarm),
+                     alarmState(json.buzzer_alarm), alarmColor(json.buzzer_alarm));
+    } else {
+        setSensorRow(3, false, "", "待接入", kSensorDim);
+    }
+
+    // LED 没有 payload 字段, 规则也待定 —— 保持占位, 不猜。
+    setSensorRow(4, false, "", "规则待定", kSensorDim);
 }
 
 bool inStartupGrace()
@@ -1486,8 +1618,11 @@ lv_obj_t *createSensorCard(lv_obj_t *parent, int height)
     return card;
 }
 
+// 一行数据: 名称 / 值 / 状态。返回值标签; 需要状态标签时传 out_state。
+// 值和状态是两回事 (比如温度有值但"阈值待定"), 所以两个标签都要能改。
 lv_obj_t *addSensorDataRow(lv_obj_t *parent, const char *name, const char *value,
-                           const char *state, bool placeholder)
+                           const char *state, bool placeholder,
+                           lv_obj_t **out_state = nullptr)
 {
     lv_obj_t *row = createPane(parent);
     lv_obj_set_width(row, LV_PCT(100));
@@ -1510,6 +1645,9 @@ lv_obj_t *addSensorDataRow(lv_obj_t *parent, const char *name, const char *value
                                               g_font_status);
     lv_obj_set_width(state_label, LV_PCT(30));
     lv_obj_set_style_text_align(state_label, LV_TEXT_ALIGN_RIGHT, 0);
+    if (out_state != nullptr) {
+        *out_state = state_label;
+    }
     return value_label;
 }
 
@@ -1599,14 +1737,19 @@ void buildSensorMain(lv_obj_t *parent, int main_w, int left_w, int top_h, int bo
     lv_obj_set_flex_align(main, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    // 接收卡片
+    // 接收卡片: 五行先显示占位, 真正进入某一路后由 refreshSensorData() 填。
     lv_obj_t *recv = createSensorCard(main, 230);
     createSensorLabel(recv, "接收：", kSensorAccent, g_font_small);
-    g_sensor_values[0] = addSensorDataRow(recv, "烟雾状态", "0", "正常", false);
-    g_sensor_values[1] = addSensorDataRow(recv, "火焰状态", "0", "正常", false);
-    g_sensor_values[2] = addSensorDataRow(recv, "温度状态", "--", "待接入", true);
-    g_sensor_values[3] = addSensorDataRow(recv, "蜂鸣器状态", "--", "规则待定", true);
-    g_sensor_values[4] = addSensorDataRow(recv, "LED状态", "--", "规则待定", true);
+    g_sensor_values[0] = addSensorDataRow(recv, "烟雾状态", "--", "待接入", true,
+                                          &g_sensor_states[0]);
+    g_sensor_values[1] = addSensorDataRow(recv, "火焰状态", "--", "待接入", true,
+                                          &g_sensor_states[1]);
+    g_sensor_values[2] = addSensorDataRow(recv, "温度状态", "--", "待接入", true,
+                                          &g_sensor_states[2]);
+    g_sensor_values[3] = addSensorDataRow(recv, "蜂鸣器状态", "--", "待接入", true,
+                                          &g_sensor_states[3]);
+    g_sensor_values[4] = addSensorDataRow(recv, "LED状态", "--", "规则待定", true,
+                                          &g_sensor_states[4]);
 
     // 模块状态 / 完整报文卡片
     lv_obj_t *info = createSensorCard(main, 200);
@@ -1656,21 +1799,21 @@ void buildSensorSettings(lv_obj_t *parent, int right_w, int x, int top_h, int bo
 
     createSensorLabel(right, "信息源设置", kSensorAccent, g_font_small);
 
-    createSensorLabel(right, "GPIO 接口", kSensorDim, g_font_status);
-    char port_options[96] = {};
-    buildPortOptions(port_options, sizeof port_options);
-    createSensorDropdownRow(right, &g_sensor_port_dd, port_options,
-                            onSensorPortChanged);
-
-    createSensorLabel(right, "线号", kSensorDim, g_font_status);
-    char line_options[64] = {};
-    buildLineOptions(0, line_options, sizeof line_options);
-    createSensorDropdownRow(right, &g_sensor_line_dd, line_options,
+    const std::string device_options = buildDeviceOptions();
+    createSensorLabel(right, "串口设备", kSensorDim, g_font_status);
+    createSensorDropdownRow(right, &g_sensor_device_dd, device_options.c_str(),
                             onSensorOptionChanged);
 
-    lv_obj_t *placeholder = createSensorButton(right, kOverlayPlaceholder, nullptr);
-    lv_obj_set_width(placeholder, LV_PCT(100));
-    lv_obj_set_height(placeholder, 44);
+    const std::string baud_options = buildBaudOptions();
+    createSensorLabel(right, "波特率", kSensorDim, g_font_status);
+    createSensorDropdownRow(right, &g_sensor_baud_dd, baud_options.c_str(),
+                            onSensorOptionChanged);
+
+    // 原来的"占位"按钮 —— 串口可以插拔, 给一个重新枚举的入口。
+    lv_obj_t *refresh = createSensorButton(right, kOverlayRefreshSerial,
+                                           onRefreshSerialList);
+    lv_obj_set_width(refresh, LV_PCT(100));
+    lv_obj_set_height(refresh, 44);
 
     // 把"应用设置"推到面板底部
     lv_obj_t *spacer = createPane(right);
@@ -1939,6 +2082,8 @@ int render()
     // 按 LVGL 给的间隔睡一下即可。
     refreshJsonLabel();
     refreshSensorFrameLabel();
+    refreshSensorStatus();  // 串口打开/断线/重连 (异步) —— 变了才重设
+    refreshSensorData();    // 接收卡五行 (帧到达/字段变化时)
 
     uint32_t idle = lv_timer_handler();
     if (idle == LV_NO_TIMER_READY || idle > kMaxSleepMs) {

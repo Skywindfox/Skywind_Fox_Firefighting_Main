@@ -415,6 +415,25 @@ return useable_tools::write_File(Led_on_board_Path, "1");
 
 共同点：**这三个设错都不会编译失败、也不会运行时崩溃**，只会让界面或排查体验变差 —— 所以单独记一笔。
 
+### C-10. 串口来源的六个坑
+
+1. **串口上的 JSON 是字节流，不能按行读。** `read()` 可能只返回半个帧，也可能一次返回多个帧
+   —— 交给 `json_source_feed(index, buf, n)` 去拼，不要自己 `fgets`/按 `\n` 切。
+2. **`O_NONBLOCK` 下 `read()` 返回 `-1` 且 `errno == EAGAIN` 是正常的**（这一轮没数据），
+   不是断线。只有返回 `0`（EOF）、其他 `errno`、或 `poll()` 报 `POLLHUP/POLLERR` 才算断。
+3. **断线的表现不止一种**：USB 转串口拔掉时设备文件会消失（`read` 报 `ENODEV/EIO`）；
+   pty 的 master 关闭时 slave 读报 `EIO`。两种都按"关端口 + 每秒重连"处理，
+   重连成功后再 `json_source_reset(index)`，否则旧流的半帧会和新流拼在一起。
+4. **`/dev/ttyS0` 常常被 getty 占着**（板上是 console）。打开"成功"但收不到数据、或者
+   两边抢输入，先查 `systemctl status serial-getty@ttyS0`，别急着怀疑接线。
+5. **普通用户打不开串口**（`EACCES`）：把用户加进 `dialout` 组
+   （`sudo usermod -aG dialout $USER`），**重新登录**才生效 —— 和 D-9 的 gpiochip 是两回事。
+6. **枚举设备时别把"当前终端"当串口**：`/dev/tty`、`/dev/ttyprintk`、`/dev/tty0..N`
+   （虚拟控制台）都不是串口；`serial_list_devices()` 已排除这几类。
+
+顺带：**测试不需要真硬件** —— 用一对伪终端（`posix_openpt`，或 `socat pty,raw,echo=0`）
+就能覆盖打开/读帧/断线；`tests/test_serial_source.cpp` 就是这么做的。
+
 ---
 
 ## D. 环境与工具

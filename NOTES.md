@@ -15,14 +15,16 @@ FireControlApp/
 │   ├── greeting.h        纯逻辑层
 │   ├── hardware_path.h   板上 sysfs 路径常量 (LED / 蜂鸣器)
 │   ├── json_frame.h      start/end 帧解析 (流式、可处理半包)
-│   ├── json_status.h     JSON 状态 (data / smoke)
+│   ├── json_status.h     JSON 状态 (temperature / *_alarm, 兼容 data/smoke)
+│   ├── serial_source.h   串口来源 (设备枚举 / 波特率 / 读取线程)
 │   ├── start.h           骨架: 四个阶段 + 程序级全局量
 │   └── usetools.h        文件读写 / GPIO 输入
 ├── src/
 │   ├── library/        静态库实现 → libfirecontrol.a
 │   │   ├── greeting.cpp  纯逻辑
 │   │   ├── json_frame.cpp start/end 帧解析
-│   │   ├── json_status.cpp cJSON 解析 {"data":..,"smoke":..}
+│   │   ├── json_status.cpp cJSON 解析 payload 字段
+│   │   ├── serial_source.cpp termios 打开 + poll 线程 + 断线重连
 │   │   ├── start.cpp     唯一主循环 + 板载 LED/蜂鸣器 + 外部蜂鸣器线程
 │   │   └── usetools.cpp  sysfs / libgpiod
 │   ├── source/         程序入口
@@ -208,7 +210,7 @@ sudo reboot
 **信息源页不是普通的三段式页，而是一个全屏覆盖层**（参考样图，深蓝灰底 + 琥珀描边）：
 顶栏是「火灾控制终端 / 运行中 + 首页 + 退出应用」；左侧是 12 个信息源按钮（可滚动、
 当前项描边加粗）；中间是「接收：烟雾/火焰/温度/蜂鸣器/LED」和「模块状态 / 收到的报文 /
-预留」两张卡片；右侧是「信息源设置」：GPIO 接口 / 线号下拉框、占位按钮、应用设置按钮。
+预留」两张卡片；右侧是「信息源设置」：串口设备 / 波特率下拉框、刷新串口、应用设置按钮。
 全局顶栏/底栏会被这个覆盖层盖住，点覆盖层顶栏的【首页】回到普通首页。
 
 普通页是**分页**的：顶栏（品牌 / 状态灯 / 设置 / 退出）所有页完全一致，切页只重建底栏按钮。
@@ -268,14 +270,15 @@ sudo reboot
   布局：顶栏 10% 高、左侧 22%、右侧 24%、中间剩余；左侧按钮可滚动，当前模块描边加粗。
 - **0 = 正常 / 1 = 异常**：这是传感器模块那边定义的，app 不做极性换算，也不提供
   "高有效/低有效"的选择。
-- **右侧【应用设置】只保存选择，不读硬件**：现在没有"按信息源读 GPIO"的实现，点应用只打印
-  `信息源 N 应用: GPIOx:y (仅保存选择, 未读硬件)` 并把模块状态改成
-  "已选择 ...（等待数据接入）"，不会伪造数据。每个信息源各自保存一份选择
-  （`g_sensor_cfg[12]`），默认值集中在 `kDefaultSensorConfig[12]`；现在全部是 `-1`
-  （未配置），等实际 12 组默认映射提供后填进去，启动时就会显示"已选择"。
+- **右侧【应用设置】才真正去打开串口**：下拉选完（串口设备 + 波特率）点应用，调
+  `serial_configure(index, device, baud)`；两个都选了才打开，有一个没选 = 取消配置并
+  关端口。打印 `信息源 N 应用串口: ... @ ... (已打开/打开失败)`，模块状态显示真实状态
+  （`未选择串口` / `已打开，等待数据` / `未打开：<原因>（每秒重连）`），不伪造数据。
+  每个信息源各自保存一份选择（`g_sensor_cfg[12]`），**没有默认值**。
 - **中间卡片**：上卡是"接收：" + 烟雾/火焰/温度/蜂鸣器/LED 五行，每行三列
-  （名称 / 值 / 状态）；下卡是"模块状态 / 收到的报文 / 预留"。烟雾、火焰默认
-  `0` / `正常`，温度 `--` / `待接入`，蜂鸣器、LED `--` / `规则待定`。
+  （名称 / 值 / 状态）；下卡是"模块状态 / 收到的报文 / 预留"。
+  五行来自 payload：`smoker_alarm` / `fire_alarm` / `temperature` / `buzzer_alarm`，
+  LED 没有对应字段。缺字段显示 `--` / `待接入`；温度显示数值 + `阈值待定`。
   收到完整帧后，报文行显示原始 `{"start":1}...{"end":1}`，长报文可滚动/换行。
 - **界面配色**：普通页仍是近黑+安全琥珀；信息源覆盖层改用深蓝灰底 + 琥珀/橙描边
   （`kSensorBg` / `kSensorPanel` / `kSensorLine` / `kSensorText`），只作用于接口页。
@@ -411,44 +414,60 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
 - **默认按屏幕尺寸建窗口**：无参数时窗口按屏幕实际尺寸建；板上跑着 Openbox，
   是否铺满由 DE 决定（见 §3 与 [workflow.md](workflow.md) §2.2）。
 
-### 8.1 JSON 状态（最基础）
+### 8.1 JSON 状态
 
-`src/library/json_status.cpp` 用 **cJSON 1.7.18**（`third_party/cjson`，MIT）解析一个最小的
-状态对象：
+`src/library/json_status.cpp` 用 **cJSON 1.7.18**（`third_party/cjson`，MIT）解析传感器模块
+上报的状态对象（字段名就是模块实际发送的字节）：
 
 ```json
-{"data":1,"smoke":1}
+{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}
 ```
 
-- 只认根对象里的 **`data`** 和 **`smoke`**，且必须是数字；其它字段忽略。
-- 解析失败不退出程序：`JsonStatus::valid=false`，`error` 里是静态原因（如“缺少 smoke”），
+- 认 6 个数字字段：**`temperature`**（浮点）、**`fire_alarm`**、**`smoker_alarm`**、
+  **`buzzer_alarm`**（0 = 正常 / 1 = 异常，由模块定义，app 不做极性换算）；
+  旧的 `data` / `smoke` 仍然认（内置示例帧、旧文件、老测试用）。
+- 字段**全部可选**：模块只发其中几个也算成功，缺的字段 `has_xxx=false`；
+  一个已知字段都没有才失败（`error="没有已知字段"`）。
+- 字段存在但**不是数字**才失败，`error` 指明是哪个字段（如“temperature 不是数字”）。
+- 解析失败不退出程序：`JsonStatus::valid=false`，`error` 里是静态原因，
   控制台和界面都显示“未识别”。
 - 数据来源优先级：
   1. `FIRECONTROL_JSON` 环境变量里的字面量（调试最方便）；
   2. `FIRECONTROL_JSON_FILE` 指定的文件；
   3. 当前目录的 `firecontrol.json`（存在才用；板上按 `cd ~/Desktop` 启动时就是它）；
-  4. 内置示例帧 `{"start":1}{"data":1,"smoke":1}{"end":1}`。
+  4. 内置示例帧
+     `{"start":1}{"temperature":25.5,"fire_alarm":0,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}`。
+  5. **串口**（真实来源，见 §8.3）：界面里选设备/波特率，或 `FIRECONTROL_SERIAL_<N>`。
 
 默认文件是相对**当前工作目录**的；从别的目录启动就找不到它，用
 `FIRECONTROL_JSON_FILE=/绝对路径`，或先 `cd ~/Desktop` 再启动。
 - 来源是文件时，`status()` 每 200 ms 重读一次；只有值/错误变化才递增 `revision`，
   GUI 只在 `revision` 变化时重设标签，不会每帧触发重排。
-- 控制台在变化时打印 `--- JSON 状态 ---` + `完整报文: ...` + `data=...  smoke=...`。
-- 界面：内容区页名下面一行 `JSON  data = 1    smoke = 1`；失败显示 `JSON 未识别 (...)`。
-  信息源页底部还有一行 `完整报文：...`，只在收到完整帧后更新。
+- 控制台在变化时打印 `--- JSON 状态 ---` + `完整报文: ...` + 这一帧里有的字段
+  （`temperature=36.5  fire_alarm=1  ...`，只打有的，不补 0）。
+- 界面：内容区页名下面一行列出有的字段；失败显示 `JSON 未识别 (...)`。
+  信息源页底部还有一行 `收到的报文：...`，只在收到完整帧后更新。
 
 示例：
 
 ```bash
 # 字面量 (完整帧)
-FIRECONTROL_JSON='{"start":1}{"data":2,"smoke":0}{"end":1}' ./build/deffire-gui-dev
+FIRECONTROL_JSON='{"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}' \
+  ./build/deffire-gui-dev
 
 # 文件（运行时追加/重写，界面 200 ms 内跟着变）
-echo '{"start":1}{"data":1,"smoke":1}{"end":1}' > firecontrol.json
+echo '{"start":1}{"temperature":36.5,"fire_alarm":1}{"end":1}' > firecontrol.json
 ./build/deffire-gui-dev
+
+# 串口: 板上直接填设备路径; 开发机上用 socat 造一对伪终端 (见 §8.3)
+socat -d -d pty,raw,echo=0 pty,raw,echo=0        # 输出两条 /dev/pts/N, M
+FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/deffire-gui-dev
+# 另一个终端往 /dev/pts/M 写帧:
+printf '%s' '{"start":1}{"temperature":36.5,"fire_alarm":1,"smoker_alarm":0,"buzzer_alarm":0}{"end":1}' > /dev/pts/M
 ```
 
-当前它**只是解析/显示**，还没有接串口、网络或真实传感器；也没有根据 `smoke` 做报警判定。
+当前它**只是解析/显示**：还没有根据 `fire_alarm` / `smoker_alarm` / `temperature` 做报警
+判定或联动，也没有接真实传感器（串口层已就绪、待上板接线）。
 
 cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不会出现
 `libcjson.so`，板上不需要装 cJSON；按原来的“本机交叉编译 → 拷到板上”流程即可。
@@ -515,12 +534,44 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 - 每个信息源有**独立**的 `JsonFrameParser` / `JsonStatus`；接口页「收到的报文」
   只显示当前信息源的完整帧。收到帧时该路 `revision` 强制递增，卡片刷新
   （长报文自动换行，卡片可上下滚动）。
-- 还没有接串口时，测试来源是：
-  - 信息源 1：`FIRECONTROL_JSON` / `FIRECONTROL_JSON_FILE` / `./firecontrol.json` / 内置帧；
-  - 信息源 N（2..12）：`FIRECONTROL_JSON_FILE_<N>`（可选）。
-- 串口接上后，每路读取线程收到字节调用 `json_source_feed(index, data, len)` 即可；
-  `index` 是 0..11。这个接口是线程安全的。现在**没有硬编码任何串口设备路径/波特率**，
-  等接线确认后再加。
+- 文件来源（开发机/无串口时）：信息源 1 用 `FIRECONTROL_JSON` / `FIRECONTROL_JSON_FILE` /
+  `./firecontrol.json` / 内置帧；信息源 2..12 用 `FIRECONTROL_JSON_FILE_<N>`（可选）。
+- 真实来源是**串口**，见 §8.3：每路一个独立设备，后台线程读字节后调用
+  `json_source_feed(index, data, len)`（线程安全）；断线重连时调 `json_source_reset(index)`。
+
+### 8.3 串口来源（2026-11）
+
+传输方式定了：**字节流**，每路信息源一个独立串口设备（不是 GPIO 开关量）。
+实现：`src/library/serial_source.cpp` + `include/serial_source.h`。
+
+- 一路一条记录：设备路径 + 波特率；**不预置默认值** —— 设备清单运行时枚举
+  （`serial_list_devices()` 扫 `/dev/tty*`，排除 `/dev/tty`、`/dev/ttyprintk`、
+  虚拟控制台 `/dev/tty0..`），波特率是标准值清单
+  （9600/19200/38400/57600/115200/230400/460800/921600）。
+- 打开方式：`O_RDWR | O_NOCTTY | O_NONBLOCK` + `cfmakeraw`、8N1、`CLOCAL|CREAD`。
+- **一个后台线程**用 `poll()` 同时盯所有已打开的端口，读到字节就
+  `json_source_feed(index, buf, n)`；单核 A7 上不开 12 个线程。
+- 断线（EOF / 读错误）：关 fd、状态记一条错误、`json_source_reset(index)`，
+  **每秒**尝试重开；重开成功后也 reset（旧流的半帧作废）。界面模块状态会跟着变。
+- 无界面/免配置：`FIRECONTROL_SERIAL_<N>="<device>:<baud>"`（N = 1..12，对应信息源
+  1..12），启动时由 `serial_apply_env()` 配置；格式不对只报一行、不崩。
+- 退出：`cpp_start()` 在拆界面之前 `serial_stop()`（关端口 + join 线程）。
+- 测试：`tests/test_serial_source.cpp` 用伪终端 (`posix_openpt`) 冒充串口，
+  覆盖打开/关闭、完整帧走串口、半帧、断线检测、非法波特率、环境变量格式错误；
+  原生 `ctest` 4/4。**不依赖真硬件**，交叉编译时跳过。
+
+界面（`gui.cpp`）：
+
+- 右栏「信息源设置」: **串口设备**（下拉，运行时枚举）+ **波特率**（下拉）+
+  【刷新串口】（原来预留的"占位"按钮）+ 【应用设置】。
+  原来的 GPIO 接口/线号 下拉已经去掉（那是开关量输入，不是字节流）。
+- 点【应用设置】才真正 `serial_configure(index, device, baud)`：两个都选了才打开，
+  有一个没选 = 取消配置并关端口。设备/波特率一个都没选时不会去猜。
+- 模块状态显示真实状态：`未选择串口` / `已打开，等待数据` / `未打开：<原因>（每秒重连）`。
+- 接收卡五行接上真实字段：烟雾 ← `smoker_alarm`、火焰 ← `fire_alarm`、
+  温度 ← `temperature`、蜂鸣器 ← `buzzer_alarm`（0 = 正常 / 1 = 异常）；
+  **LED 没有对应字段**，保持"规则待定"占位。缺字段的行显示"待接入"，
+  温度只给数值 + "阈值待定"，不擅自判正常/异常。
 
 各项的设计取舍与踩过的坑在 [WARNING.md](WARNING.md)。
 ---
@@ -529,8 +580,9 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 
 | 项目 | 结果 |
 |---|---|
-| 原生构建 | 0 warning，`ctest` 3/3 |
-| JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖合法/缺字段/类型错误/语法错误/尾部垃圾 + 逐路 feed/reset；`test_json_frame` 覆盖分块到达、半包、不完整帧丢弃、新 start 重开、多帧；控制台/本地 UI 已验证逐路文件（信息源 2 显示自己的帧，其他路不受影响）；**板上串口待接** |
+| 原生构建 | 0 warning，`ctest` 4/4 |
+| JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖新四字段/旧 data+smoke/缺字段/类型错误/语法错误/尾部垃圾/没有已知字段 + 逐路 feed/reset；`test_json_frame` 覆盖分块到达、半包、不完整帧丢弃、新 start 重开、多帧；控制台已验证逐路文件；**板上真串口待接** |
+| 串口来源 | `test_serial_source`（伪终端）覆盖打开/关闭、完整帧经串口解析、半帧拼接、断线检测、非法波特率、环境变量格式错误；**板上真串口待接** |
 | 原生 GUI | `deffire-gui-dev` 约 900 KB，1024×600 窗口正常；首页 12 个信息源、设置页、信息源页、LED / 蜂鸣器 / 外部蜂鸣器页的切页与按钮派发已实测（含文件 JSON 热更新） |
 | 容器镜像构建 | ✅ 通过（`bookworm-slim` + gcc-arm 12 + cmake 3.25.1） |
 | 镜像自检 | ✅ 能交叉编译 X11+FreeType 的 armhf 程序；pkg-config 指向 armhf |
@@ -550,17 +602,21 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 - [ ] **全屏交给 DE**：不再自己实现。按 [workflow.md](workflow.md) §2.2 向 LXDE/Openbox
       发 `_NET_WM_STATE_FULLSCREEN` 请求（或配窗口规则），确认一次铺满即可；
       不在 GUI 里手工算坐标 / 造无边框窗口（见 WARNING.md C-7）
-- [ ] **填 12 组默认 GPIO 映射**：`kDefaultSensorConfig[12]` 现在全是 `-1`（未配置）；
-      项目成员提供实际端口/线号后填进去，启动时就会显示"已选择 ..."。
-      没填的模块仍可在 app 内手动选
-- [ ] **信息源页的数据行接真实数据**：页面已有 `烟雾 / 火焰 / 温度 / 蜂鸣器状态 / LED 状态`
-      五行；现在烟雾/火焰是默认 `0（正常）`，温度/蜂鸣器/LED 是占位符。接上数据源后
-      更新 `g_sensor_values[5]`，不要预置假读数
-- [ ] **确定蜂鸣器/LED 联动规则**：目前两行都显示 `--（规则待定）`，还没根据烟雾/火焰/
-      温度计算；规则定下来后再写判定并驱动对应输出
-- [ ] **确定温度阈值/单位**：温度目前显示 `--（数值待接入）`，阈值和单位都未定
-- [ ] **把 12 个信息源入口接到真实数据源**：当前 JSON 只显示全局 `data` / `smoke`，
-      还没有按信息源拆分；需要先有模块 ID → 通道的映射（见 workflow.md §2.5）
+- [x] ~~**填 12 组默认 GPIO 映射**~~ —— 传输方式确定为**字节流**后作废：接口页已改成
+      "串口设备 + 波特率"，不再按 GPIO 端口/线号选。开关量输入的 `kGpioInputs` 仍是空表
+      （见 workflow.md §2.3），与信息源页无关
+- [x] ~~**信息源页的数据行接真实数据**~~ —— 已接上 `temperature` / `fire_alarm` /
+      `smoker_alarm` / `buzzer_alarm`；LED 没有对应字段，保持占位
+- [ ] **12 路串口的默认配置**：设备路径/波特率按现场接线填。启动时可用
+      `FIRECONTROL_SERIAL_<N>`，或进信息源页右栏选完点【应用设置】；**不预置猜出来的值**
+- [ ] **板上接真串口验证**：一路跑通（`/dev/ttyS*` 或 USB 转串口）→ 半包/坏帧/拔线重连，
+      以及断开后每秒重连、界面模块状态是否跟着变
+- [ ] **确定蜂鸣器/LED 联动规则**：蜂鸣器行现在显示模块给的 `buzzer_alarm` 值；
+      要不要根据它驱动板载蜂鸣器/LED 还没定。LED 行仍是 `--（规则待定）`
+- [ ] **确定温度阈值/单位**：温度显示数值 + "阈值待定"，单位是模块定还是 app 换算、
+      多少度算异常，都还没定
+- [ ] **是否需要 app 主动发请求报文**：现在只接收、不应答；若模块改成"查询-应答"式，
+      才需要加发送路径（当前没有任何发送代码）
 - [ ] **外部无源蜂鸣器的音调还没调**：板上已确认"能响"，但没扫过频率。用
       `FIRECONTROL_BUZZER_HZ=1000/2000/3000/4000` 各试一遍，找出最响的那个，
       再把 `start.cpp` 的 `kOutBuzzerDefaultHz` 改成它（当前默认 2 kHz）
@@ -569,9 +625,9 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
       [workflow.md](workflow.md) §2.3
 - [ ] **传感器做成可扩展注册表**：探测器数量/型号未定，后续改成配置文件/运行时注册，
       支持任意 N 路；当前 `kGpioInputs` 的静态空表只是占位（见 workflow.md §2.3）
-- [ ] **接 12 路独立串口**：现在每路 parser/status 和 `json_source_feed(index, data, len)`
-      已就绪，但串口还没接线。需要设备路径/波特率，开串口读取线程，收到字节直接喂对应 index；
-      断线重连时调 `json_source_reset(index)`。目前**没有硬编码任何设备路径**
+- [x] ~~**接 12 路独立串口**~~ —— app 侧已实现（`serial_source.cpp`：每路设备+波特率、
+      poll 线程、断线每秒重连 + reset）；板上真串口接线/路径仍需现场确认
 - [ ] **板上验证逐路帧**：用 `FIRECONTROL_JSON_FILE_<N>` 分别喂 1..12，确认各页只显示
-      自己的完整帧；再接真实串口验证半包/坏帧/重连
-- [ ] **串口错误/超时状态**：断线、长时间无帧、CRC/格式错误怎么显示到模块状态，还没定
+      自己的完整帧（需要板上有 X 才能看界面）；串口侧用伪终端或真设备验证半包/坏帧/重连
+- [ ] **串口超时/无帧状态**：断线已有状态和重连；"打开了但长时间没有帧"、
+      CRC/格式错误怎么显示到模块状态，还没定
