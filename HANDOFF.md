@@ -11,8 +11,8 @@
 | 项 | 值 |
 |---|---|
 | 分支 | 只剩 `main`（本地/远端） |
-| 最新提交 | 本轮 `docs: 说明报文头/尾归属（app 不添加）+ 移除交接里的临时备注`（hash 见 `git log -1`） |
-| `main` = `origin/main` | 提交后本地领先 1 个提交；推送前用 `git log origin/main..main` 核一下 |
+| 最新提交 | `0d6b292` `docs: 明确报文头/尾归发送方(app 不添加) + 清理交接备注` |
+| `main` = `origin/main` | `0d6b292`（已推送） |
 | 工作区 | 干净；`build/` 已重建（本轮），`build-armhf/` 未生成 |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
 | 最近测试 | 本轮重建后 `ctest` 3/3 通过 |
