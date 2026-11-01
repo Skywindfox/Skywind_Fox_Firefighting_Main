@@ -367,8 +367,29 @@ DE: LXDE     WM: Openbox     Resolution: 1024x600
 // 发送到 root window, 带 SubstructureRedirectMask | SubstructureNotifyMask
 ```
 
-**代码里还没发这条请求**。落地后按 runbook §4.3 确认一次即可；如果 Openbox 不认，
-再考虑窗口规则或其它 DE 侧配置。
+**2026-11 已实现**（`gui.cpp` 的 `requestFullscreen()` / `ensureFullscreen()`）：
+
+- 自己开一条 X 连接，**按标题找最内层同名窗口**再发消息 —— WM 的框架窗口和 client
+  同名，发给框架无效（踩过：只发给外层，状态一直是 MAXIMIZED）。
+- 请求放在**主循环首帧之后**发，重试 8 次、间隔 250 ms。窗口要等 LVGL flush 映射、
+  WM 处理完才存在；在建窗后立刻发会被忽略。
+- 实测（开发机 mutter/Xwayland）：`_NET_WM_STATE` 变成 `_NET_WM_STATE_FULLSCREEN`，
+  窗口 1600×900 无标题栏；`--windowed` 不请求。
+
+**症状对照**（用户报的"底栏按钮只剩上半截"）：应用建 1024×600（= 整屏）窗口 →
+Openbox 加标题栏，窗口总高变成 `600 + 标题栏` 溢出屏幕 → lxpanel 再压住最下面一条 →
+底栏按钮被切掉。所以要么让 WM 全屏（上面的请求），要么 DE 侧腾地方：
+
+```bash
+# 1) lxpanel 自动隐藏: 右键面板 → Panel Settings → Advanced → Auto-hide
+#    或改 ~/.config/lxpanel/LXDE/panels/panel: autohide=1
+
+# 2) Openbox 单窗口规则 (~/.config/openbox/rc.xml 的 <applications> 里):
+#    <application name="FireControlApp"><decor>no</decor><fullscreen>yes</fullscreen></application>
+openbox --reconfigure
+```
+
+如果 Openbox 不认 EWMH 请求，用规则兜底；两者都别改界面代码去手工算坐标。
 
 **另一条可选路径**：LXDE 下也可以直接关掉 WM 再跑程序，但那样桌面上其他程序也会失去
 窗口管理——不推荐。

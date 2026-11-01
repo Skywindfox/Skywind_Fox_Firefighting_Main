@@ -74,8 +74,13 @@ main.cpp（收命令行参数 + 定义程序级全局量 g_quit / g_argc / g_arg
 `_NET_WM_STATE_FULLSCREEN` 请求（或在 LXDE/Openbox 里配窗口规则），是否铺满由 WM
 决定；不在 GUI 里手工算坐标、也不造无边框窗口。
 
-**当前状态**：方案已定，代码/DE 侧还没落地这个请求；下次上板按 runbook §4.3
-确认一次"发请求后是否铺满"即可。详见 WARNING C-7。
+**当前状态（2026-11 已落地）**：`gui.cpp` 在**主循环首帧之后**（`ensureFullscreen()`）
+按 EWMH 发 `_NET_WM_STATE_FULLSCREEN`，最多重试 8 次、间隔 250 ms；`--windowed` 预览
+模式不发。为什么不能在建窗后立刻发：窗口要等 LVGL flush 映射请求、WM 处理完才存在，
+早发会被 WM 忽略（实测：请求发早了窗口只会被"最大化"）。
+
+请求只是**请求**：是否铺满仍由 WM 决定。如果板上 Openbox 不认，走 DE 侧配置
+（lxpanel 自动隐藏 / Openbox per-app 规则），见 WARNING C-7。
 
 ### 2.3 传感器模块：开关量输入（libgpiod，暂存）
 

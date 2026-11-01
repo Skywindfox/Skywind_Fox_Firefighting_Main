@@ -63,7 +63,7 @@ e1c4964  docs: 添加会话交接快照 HANDOFF.md
 | `include/serial_source.h` | 串口来源：设备枚举、波特率清单、配置/状态、start/stop、env |
 | `src/library/serial_source.cpp` | termios 打开、单 poll 线程、断线每秒重连、喂帧 |
 | `src/library/start.cpp` | 主循环、`status()` 里逐路打印、串口生命周期、硬件动作 |
-| `src/appgui/gui.cpp` | 首页/设置/调试页 + 信息源接口页全屏覆盖层（串口选择 + 五行数据） |
+| `src/appgui/gui.cpp` | 首页/设置/调试页 + 信息源接口页覆盖层（串口选择 + 五行数据）；EWMH 全屏请求 |
 | `tests/test_json_frame.cpp` | 帧解析单元测试 |
 | `tests/test_json_status.cpp` | 字段解析 + 逐路 feed/reset 测试 |
 | `tests/test_serial_source.cpp` | 伪终端串口测试（打开/帧/断线/非法波特率/env） |

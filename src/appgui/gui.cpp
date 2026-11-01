@@ -43,7 +43,9 @@
 
 #include <lvgl.h>
 
+#include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #include <algorithm>
 #include <clocale>
@@ -569,6 +571,9 @@ int g_sensor_index = 0;  // Page::Sensor 时对应 0..11
 // 切页请求。事件回调里**只置这个标志**, 真正的重建放到主循环里做 ——
 // 否则会在"正在派发某个按钮的点击"的过程中删掉它所在的底栏。
 bool g_page_dirty = false;
+
+// 当前是不是 --windowed 预览模式 (全屏请求只在板上模式发, 见 ensureFullscreen)
+bool g_windowed_mode = false;
 
 // 上一步动作的结果, 显示在内容区 (nullptr = 刚切过页, 只显示页名)
 const char *g_last_outcome = nullptr;
@@ -1224,6 +1229,126 @@ void onKey(lv_event_t *e)
         std::fflush(stdout);
         g_quit = true;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 请窗口管理器把我们的窗口设为全屏 (EWMH _NET_WM_STATE_FULLSCREEN)
+//
+// 为什么需要: 板上是 Openbox + lxpanel。应用建的是 1024x600 (= 整屏) 的窗口,
+// Openbox 再往上加标题栏, 窗口总高就超过屏幕, 底部被推到屏幕外; lxpanel 又占着
+// 屏幕最下面一条 —— 结果就是底栏按钮只剩上半截。
+// 按 workflow.md §2.2 的决定, 全屏交给 DE: 应用只**请求**, 铺不铺满由 WM 决定,
+// 不手工算坐标、也不自己造无边框窗口。
+//
+// LVGL 的 X11 驱动不暴露窗口句柄/全屏接口, 所以这里自己开一条 X 连接, 按标题
+// 找到刚建好的窗口, 往 root 发一个 ClientMessage。找不到/没 WM 时静默失败。
+// ---------------------------------------------------------------------------
+// 按标题找窗口。注意 **WM 的框架窗口和 client 窗口同名** (Openbox/mutter 都这样),
+// 而 _NET_WM_STATE 必须发给 client —— 所以先递归子窗口 (深的优先), 自己没有子窗口
+// 命中时才用自己。按"最内层同名窗口"取, 才不会把请求发给框架。
+Window findWindowByTitle(Display *d, Window window, const char *title)
+{
+    Window root = None;
+    Window parent = None;
+    Window *children = nullptr;
+    unsigned int count = 0;
+    if (XQueryTree(d, window, &root, &parent, &children, &count) != 0) {
+        for (unsigned int i = 0; i < count; i++) {
+            const Window found = findWindowByTitle(d, children[i], title);
+            if (found != None) {
+                XFree(children);
+                return found;
+            }
+        }
+        XFree(children);
+    }
+
+    char *name = nullptr;
+    if (XFetchName(d, window, &name) && name != nullptr) {
+        const bool hit = std::strcmp(name, title) == 0;
+        XFree(name);
+        if (hit) {
+            return window;
+        }
+    }
+    return None;
+}
+
+bool requestFullscreen();  // 定义在后面
+
+// 启动后重试几次: 窗口要等 LVGL 自己 flush 了映射请求、WM 处理完才会出现,
+// 所以请求放在主循环里发 (render()), 而不是 gui_build() 里。
+void ensureFullscreen()
+{
+    static int attempts = 0;
+    static uint32_t next_tick = 0;
+
+    if (g_windowed_mode || attempts >= 8) {
+        return;
+    }
+    const uint32_t now = lv_tick_get();
+    if (attempts > 0 && now < next_tick) {
+        return;
+    }
+    attempts++;
+    next_tick = now + 250;
+    requestFullscreen();
+}
+
+bool requestFullscreen()
+{
+    Display *d = XOpenDisplay(nullptr);
+    if (d == nullptr) {
+        return false;
+    }
+
+    const Window win = findWindowByTitle(d, DefaultRootWindow(d), kTitle);
+    if (win == None) {
+        XCloseDisplay(d);
+        return false;
+    }
+
+    // 已经是全屏就什么都不用做 (重试时会走到这里)。
+    const Atom wm_state_atom = XInternAtom(d, "_NET_WM_STATE", False);
+    const Atom fullscreen_atom = XInternAtom(d, "_NET_WM_STATE_FULLSCREEN", False);
+    {
+        Atom type = None;
+        int format = 0;
+        unsigned long count = 0;
+        unsigned long after = 0;
+        unsigned char *data = nullptr;
+        if (XGetWindowProperty(d, win, wm_state_atom, 0, 32, False, XA_ATOM, &type,
+                               &format, &count, &after, &data) == Success &&
+            data != nullptr) {
+            bool is_fullscreen = false;
+            for (unsigned long i = 0; i < count; i++) {
+                if (reinterpret_cast<Atom *>(data)[i] == fullscreen_atom) {
+                    is_fullscreen = true;
+                }
+            }
+            XFree(data);
+            if (is_fullscreen) {
+                XCloseDisplay(d);
+                return true;
+            }
+        }
+    }
+
+    XEvent event {};
+    event.xclient.type = ClientMessage;
+    event.xclient.window = win;
+    event.xclient.message_type = wm_state_atom;
+    event.xclient.format = 32;
+    event.xclient.data.l[0] = 1;  // _NET_WM_STATE_ADD
+    event.xclient.data.l[1] = static_cast<long>(fullscreen_atom);
+    event.xclient.data.l[2] = 0;
+    event.xclient.data.l[3] = 1;  // 普通应用发起的请求
+
+    XSendEvent(d, DefaultRootWindow(d), False,
+               SubstructureRedirectMask | SubstructureNotifyMask, &event);
+    XFlush(d);
+    XCloseDisplay(d);
+    return true;
 }
 
 // 显示对象被删掉时会被调用 —— 无论是我们自己删, 还是窗口管理器点了关闭。
@@ -2049,6 +2174,14 @@ int gui_build()
     lv_x11_inputs_create(g_disp, nullptr);
     lv_display_add_event_cb(g_disp, onDisplayDeleted, LV_EVENT_DELETE, nullptr);
 
+    // 板上 (Openbox + lxpanel): 不请求全屏的话, 标题栏把窗口往下推、lxpanel 再盖住
+    // 最下面一条, 底栏按钮会被切掉一半。真正的请求在主循环里发 (见 ensureFullscreen)
+    // —— 这里窗口还没被 LVGL flush/映射, 现在发会被 WM 忽略。
+    g_windowed_mode = windowed;
+    if (!windowed) {
+        std::printf("  全屏   : 请求 _NET_WM_STATE_FULLSCREEN（主循环里发，铺不铺满由 WM 决定）\n");
+    }
+
     // 输入采样压得比刷新快: 刷新 16ms 一次决定"画面多久更新", 采样 5ms 一次决定
     // "多久看一眼有没有按下"。两者用同一个值会让快点击被整次吞掉(见 kIndevReadMs)。
     for (lv_indev_t *indev = lv_indev_get_next(nullptr); indev != nullptr;
@@ -2118,6 +2251,8 @@ int render()
     //
     // X11 后端自己有两个定时器在读 X 事件 (显示 5 ms / 输入 1 ms), 这里只需要
     // 按 LVGL 给的间隔睡一下即可。
+    ensureFullscreen();  // 窗口映射后再请 WM 全屏 (只发请求, 见 workflow §2.2)
+
     refreshJsonLabel();
     refreshSensorFrameLabel();
     refreshSensorStatus();  // 串口打开/断线/重连 (异步) —— 变了才重设

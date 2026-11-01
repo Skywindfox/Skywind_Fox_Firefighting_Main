@@ -347,9 +347,18 @@ DISPLAY=:0 xdotool getactivewindow getwindowgeometry
 DISPLAY=:0 wmctrl -lG
 ```
 
-若没铺满：按 [workflow.md](workflow.md) §2.2 的决定处理 —— **不自己实现**，而是向 DE
-提交 `_NET_WM_STATE_FULLSCREEN` 请求（或在 LXDE/Openbox 配窗口规则）；把实测现象
-（截屏/照片 + 差了多少像素）记下来，确认 DE 侧请求/配置是否生效。
+预期（2026-11 起）：程序启动后会向 WM 请求 `_NET_WM_STATE_FULLSCREEN`（控制台打印
+`全屏   : 请求 _NET_WM_STATE_FULLSCREEN…`），窗口应无标题栏、铺满 1024×600，
+底栏按钮完整可见。若仍被 lxpanel/标题栏挡住：
+
+1. 先确认请求是否生效（装了才有）：
+   ```bash
+   DISPLAY=:0 xprop -id "$(xdotool search --name FireControlApp | head -1)" _NET_WM_STATE
+   ```
+2. 不生效就按 [WARNING.md](WARNING.md) C-7 的 DE 侧兜底：lxpanel 自动隐藏，或
+   `~/.config/openbox/rc.xml` 里给 `FireControlApp` 配 `<decor>no</decor>` +
+   `<fullscreen>yes</fullscreen>`，然后 `openbox --reconfigure`。
+3. **不要**改界面代码去手工算坐标/减法 —— 布局是 1024×600 设计, 差几像素就重画。
 
 ### 4.4 JSON 帧 / 状态
 

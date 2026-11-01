@@ -136,8 +136,13 @@ BASE_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim \
 
 **2026-10-18 决定：不自己实现真全屏。** 全屏交给 DE —— 应用侧按 EWMH 发送
 `_NET_WM_STATE_FULLSCREEN` 请求（或在 LXDE/Openbox 里配窗口规则），是否铺满由 WM
-决定，不在 GUI 里手工算坐标、也不造无边框窗口。代码里目前还没发这个请求，
-详见 [workflow.md](workflow.md) §2.2 与 [WARNING.md](WARNING.md) C-7。
+决定，不在 GUI 里手工算坐标、也不造无边框窗口。
+
+**2026-11 已实现请求**（`gui.cpp` 的 `requestFullscreen()` / `ensureFullscreen()`）：
+主循环首帧之后发、重试 8 次、间隔 250 ms；按标题找**最内层同名窗口**（WM 框架窗口
+和 client 同名，发给框架无效）；`--windowed` 不发。板上实测若 Openbox 不认，走
+lxpanel 自动隐藏 / Openbox per-app 规则兜底。详见
+[workflow.md](workflow.md) §2.2 与 [WARNING.md](WARNING.md) C-7。
 
 **板上需要装的**：
 
