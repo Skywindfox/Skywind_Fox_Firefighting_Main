@@ -45,6 +45,7 @@
 
 #include <X11/Xlib.h>
 
+#include <algorithm>
 #include <clocale>
 #include <cctype>
 #include <cstdio>
@@ -617,11 +618,24 @@ void refreshPageLabel()
 // 【应用设置】才真正去打开, 打开结果由 serial_source.cpp 记状态。
 // ---------------------------------------------------------------------------
 
+// 下拉里能选的设备 = 运行时枚举到的 /dev/tty*, 再加上**当前已配置但没枚举到**的
+// 那个 (例如 FIRECONTROL_SERIAL_<N> 指定的 /dev/pts/… 或自定义路径)。
+// 不把已配置的设备从下拉里弄丢 —— 否则一按【应用设置】就会被覆盖成"未选择"。
+std::vector<std::string> deviceList(const std::string &configured)
+{
+    std::vector<std::string> devices = firecontrol::serial_list_devices();
+    if (!configured.empty() &&
+        std::find(devices.begin(), devices.end(), configured) == devices.end()) {
+        devices.push_back(configured);
+    }
+    return devices;
+}
+
 // 设备下拉的选项文本 (LVGL dropdown 要 \n 分隔): "未选择\n/dev/ttyS0\n..."
-std::string buildDeviceOptions()
+std::string buildDeviceOptions(const std::string &configured)
 {
     std::string options = "未选择";
-    for (const std::string &device : firecontrol::serial_list_devices()) {
+    for (const std::string &device : deviceList(configured)) {
         options += '\n';
         options += device;
     }
@@ -644,7 +658,7 @@ int deviceIndexOf(const std::string &device)
     if (device.empty()) {
         return 0;
     }
-    const std::vector<std::string> devices = firecontrol::serial_list_devices();
+    const std::vector<std::string> devices = deviceList(device);
     for (std::size_t i = 0; i < devices.size(); i++) {
         if (devices[i] == device) {
             return static_cast<int>(i) + 1;
@@ -653,12 +667,12 @@ int deviceIndexOf(const std::string &device)
     return 0;
 }
 
-std::string deviceAt(int selected)
+std::string deviceAt(int selected, const std::string &configured)
 {
     if (selected <= 0) {
         return {};
     }
-    const std::vector<std::string> devices = firecontrol::serial_list_devices();
+    const std::vector<std::string> devices = deviceList(configured);
     const std::size_t index = static_cast<std::size_t>(selected - 1);
     return index < devices.size() ? devices[index] : std::string();
 }
@@ -787,7 +801,7 @@ void loadSensorControls()
     }
 
     // 设备清单可能变过 (插拔), 每次进页都重建一遍再回填选择。
-    const std::string options = buildDeviceOptions();
+    const std::string options = buildDeviceOptions(cfg.device);
     lv_dropdown_set_options(g_sensor_device_dd, options.c_str());
     lv_dropdown_set_selected(g_sensor_device_dd, deviceIndexOf(cfg.device));
     lv_dropdown_set_selected(g_sensor_baud_dd, baudIndexOf(cfg.baud));
@@ -806,8 +820,10 @@ void onRefreshSerialList(lv_event_t *e)
         return;
     }
 
-    const std::string current = deviceAt(lv_dropdown_get_selected(g_sensor_device_dd));
-    const std::string options = buildDeviceOptions();
+    const std::string current =
+        deviceAt(lv_dropdown_get_selected(g_sensor_device_dd),
+                 g_sensor_cfg[g_sensor_index].device);
+    const std::string options = buildDeviceOptions(current);
     lv_dropdown_set_options(g_sensor_device_dd, options.c_str());
     lv_dropdown_set_selected(g_sensor_device_dd, deviceIndexOf(current));
 
@@ -829,7 +845,7 @@ void onApplySensorConfig(lv_event_t *e)
     LV_UNUSED(e);
 
     SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
-    cfg.device = deviceAt(lv_dropdown_get_selected(g_sensor_device_dd));
+    cfg.device = deviceAt(lv_dropdown_get_selected(g_sensor_device_dd), cfg.device);
     cfg.baud = baudAt(lv_dropdown_get_selected(g_sensor_baud_dd));
 
     const bool configured = !cfg.device.empty() && cfg.baud > 0;
@@ -1799,7 +1815,7 @@ void buildSensorSettings(lv_obj_t *parent, int right_w, int x, int top_h, int bo
 
     createSensorLabel(right, "信息源设置", kSensorAccent, g_font_small);
 
-    const std::string device_options = buildDeviceOptions();
+    const std::string device_options = buildDeviceOptions(g_sensor_cfg[g_sensor_index].device);
     createSensorLabel(right, "串口设备", kSensorDim, g_font_status);
     createSensorDropdownRow(right, &g_sensor_device_dd, device_options.c_str(),
                             onSensorOptionChanged);

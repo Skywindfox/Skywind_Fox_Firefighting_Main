@@ -567,6 +567,9 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
   原来的 GPIO 接口/线号 下拉已经去掉（那是开关量输入，不是字节流）。
 - 点【应用设置】才真正 `serial_configure(index, device, baud)`：两个都选了才打开，
   有一个没选 = 取消配置并关端口。设备/波特率一个都没选时不会去猜。
+- 下拉里的设备 = 运行时枚举到的 `/dev/tty*` **加上当前已配置的那个**：像
+  `FIRECONTROL_SERIAL_<N>` 指定的 `/dev/pts/…` 这种枚举不到的设备也会显示出来，
+  不会被回落成"未选择"、更不会在下次点应用时被覆盖。
 - 模块状态显示真实状态：`未选择串口` / `已打开，等待数据` / `未打开：<原因>（每秒重连）`。
 - 接收卡五行接上真实字段：烟雾 ← `smoker_alarm`、火焰 ← `fire_alarm`、
   温度 ← `temperature`、蜂鸣器 ← `buzzer_alarm`（0 = 正常 / 1 = 异常）；
