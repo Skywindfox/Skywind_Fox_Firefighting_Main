@@ -11,19 +11,20 @@
 | 项 | 值 |
 |---|---|
 | 分支 | 只剩 `main`（本地/远端） |
-| 最新提交 | `0d6b292` `docs: 明确报文头/尾归发送方(app 不添加) + 清理交接备注`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
-| `main` = `origin/main` | `0d6b292`（已推送） |
+| 最新提交 | `96d4e18` `feat: 每路独立串口来源 + 模块字段解析`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
+| `main` = `origin/main` | `96d4e18`（已推送） |
 | 工作区 | 干净；`build/` 已重建（本轮），`build-armhf/` 未生成 |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
-| 最近测试 | 本轮重建后 `ctest` 3/3 通过 |
+| 最近测试 | 本轮重建后 `ctest` 4/4 通过 |
 
 最近提交：
 
 ```text
-本轮     docs: 说明报文头/尾归属（app 不添加）+ 移除交接里的临时备注
+96d4e18  feat: 每路独立串口来源 + 模块字段解析
+ee59410  docs(HANDOFF): 说明表格里的 hash 以 git log 为准
+06250e6  docs(HANDOFF): 同步本轮提交 hash 与推送状态
+0d6b292  docs: 明确报文头/尾归发送方(app 不添加) + 清理交接备注
 e1c4964  docs: 添加会话交接快照 HANDOFF.md
-d96d1a2  docs: 更新仓库地址为 Skywind_Fox_Firefighting_Main
-a4ccfd1  feat: cJSON 帧解析 + 12 路信息源接口页
 ```
 
 ---
