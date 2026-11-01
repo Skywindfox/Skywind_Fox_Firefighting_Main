@@ -587,7 +587,7 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 | 容器镜像构建 | ✅ 通过（`bookworm-slim` + gcc-arm 12 + cmake 3.25.1） |
 | 镜像自检 | ✅ 能交叉编译 X11+FreeType 的 armhf 程序；pkg-config 指向 armhf |
 | 容器内交叉编译 | ✅ LVGL 全量 + `deffire-gui-dev` 链接成功 |
-| **armhf 产物** | **约 0.4 MB**（具体字节以构建产物为准），`ELF32 / ARM / hard-float`，依赖 `libX11` / `libfreetype` / **`libgpiod`** / `libstdc++` / `libgcc_s` / `libc`；同源同镜像重建 sha256 逐字节一致（可复现） |
+| **armhf 产物** | **约 0.4 MB**（2026-11 本轮重建 486 KB；具体字节以构建产物为准），`ELF32 / ARM / hard-float`，依赖 `libX11` / `libfreetype` / **`libgpiod`** / `libstdc++` / `libgcc_s` / `libc`；同源同镜像重建 sha256 逐字节一致（可复现） |
 | 上板实测（LVGL 版） | ✅ **已上板验证通过**（2026-10-18，项目成员确认；逐项证据建议按 [VERIFY-RUNBOOK.md](VERIFY-RUNBOOK.md) §5 回填） |
 | 上板实测（老 Xlib+Xft 版） | ✅ 曾通过（窗口正常、中文正常），但该版本已被 LVGL 版取代 |
 

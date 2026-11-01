@@ -13,9 +13,9 @@
 | 分支 | 只剩 `main`（本地/远端） |
 | 最新提交 | `96d4e18` `feat: 每路独立串口来源 + 模块字段解析`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
 | `main` = `origin/main` | `96d4e18`（已推送） |
-| 工作区 | 干净；`build/` 已重建（本轮），`build-armhf/` 未生成 |
+| 工作区 | 干净；`build/`、`build-armhf/` 都在（本轮 native + armhf 都重建过） |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
-| 最近测试 | 本轮重建后 `ctest` 4/4 通过 |
+| 最近测试 | 本轮 `ctest` 4/4 通过；armhf 交叉编译通过（`build-armhf/deffire-gui-dev`，约 486 KB） |
 
 最近提交：
 
@@ -204,7 +204,7 @@ JsonStatus json_status();           // 信息源 0，普通页 JSON 行用
 
 ## 6. 构建 / 运行 / 部署
 
-构建目录：`build/` 已重建（本轮 native，`ctest` 4/4）；`build-armhf/` 未生成。
+构建目录：`build/`、`build-armhf/` 都已重建（本轮 native `ctest` 4/4 + armhf 交叉编译）。
 
 ```bash
 ./build.sh native        # build/ + ctest
