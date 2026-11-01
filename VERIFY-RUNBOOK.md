@@ -360,45 +360,50 @@ DISPLAY=:0 wmctrl -lG
    `<fullscreen>yes</fullscreen>`，然后 `openbox --reconfigure`。
 3. **不要**改界面代码去手工算坐标/减法 —— 布局是 1024×600 设计, 差几像素就重画。
 
-### 4.4 JSON 帧 / 状态
+### 4.4 报文格式 / 解析
 
-帧格式和 payload（字段名、语义都来自模块固件）：
+探测版模块发的是带信封的一整条 JSON（结尾 `\r\n`）：
 
 ```text
-{"start":1} ...数据... {"end":1}
-{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
+{"header":"SENSOR_DATA","data":{"temperature":20.06,"int_dev":1,"int_err":0,
+ "fire_alarm":1,"smoke_alarm":0,"led_state":0,"buzzer_state":0},"footer":"END"}\r\n
 ```
 
-- `temperature` 浮点；`fire_state` / `smoke_state` 是 0/1（0 无、1 有）；
+- **不再要求 `{"start":1}` / `{"end":1}`**：app 只从字节流里抠 `{...}` 完整对象，
+  对象之外的字节（头/尾、`\r\n`、垃圾）全部丢弃；
+- 状态字段在 `data` 子对象里；`header` / `footer` / `int_dev` / `int_err` 忽略；
+- `temperature` 浮点；`fire_alarm` / `smoke_alarm` 是 0/1（0 无、1 有）；
 - `buzzer_state`：0 灭 / 1 急促(100ms) / 2 缓慢(500ms) / 3 长响；
 - `led_state`：0 灭 / 1 蓝闪(烟) / 2 绿闪(温) / 3 红闪(火) / 4 蓝绿 / 5 蓝红 / 6 绿红 / 7 轮转；
-- 字段**都可选**；旧名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作别名仍认，
-  旧 `data`/`smoke` 也兼容。
+- 字段**都可选**；旧名 `fire_state` / `smoke_state` / `smoker_alarm` / `buzzer_alarm`
+  作别名仍认，旧 `data`/`smoke` 也兼容。
 
-默认内置示例帧是
-`{"start":1}{"temperature":25.5,"fire_state":0,"smoke_state":0,"buzzer_state":0,"led_state":0}{"end":1}`。
-普通页内容区页名下面应显示 `JSON  温度=25.5  火焰=0  烟雾=0  蜂鸣=0  LED=0`；
-信息源接口页「收到的报文」应显示上面那条完整帧；接收卡五行应显示
-烟雾 `0 无烟` / 火焰 `0 无火` / 温度 `25.5 阈值待定` / 蜂鸣器 `0 灭` / LED `0 灭`。
+默认内置示例报文是
+`{"header":"SENSOR_DATA","data":{"temperature":20.06,"int_dev":1,"int_err":0,"fire_alarm":0,"smoke_alarm":0,"led_state":0,"buzzer_state":0},"footer":"END"}`。
+普通页内容区页名下面应显示 `JSON  温度=20.1  火焰=0  烟雾=0  蜂鸣=0  LED=0`；
+信息源接口页「收到的报文」应显示上面那条原文；接收卡五行应显示
+烟雾 `0 无烟` / 火焰 `0 无火` / 温度 `20.1 阈值待定` / 蜂鸣器 `0 灭` / LED `0 灭`。
 控制台在第一轮 `status()` 会打印：
 
 ```text
 --- JSON 状态 ---
-  完整报文: {"start":1}{"temperature":25.5,...}{"end":1}
-  temperature=25.5  fire_state=0  smoke_state=0  buzzer_state=0  led_state=0
+  完整报文: {"header":"SENSOR_DATA",...}
+  temperature=20.06  fire_alarm=0  smoke_alarm=0  buzzer_state=0  led_state=0
 ```
 
 | 场景 | 怎么触发 | 通过标准 |
 |---|---|---|
-| 默认示例 | 直接在 `~/Desktop` 启动 | 普通页列出五个字段；接口页“收到的报文”带 start/end；五行按上面对应 |
-| 完整帧字面量 | `FIRECONTROL_JSON='{"start":1}{"temperature":40,"fire_state":1,"buzzer_state":1,"led_state":3}{"end":1}' DISPLAY=:0 ./deffire-gui-dev` | 普通页 温度=40.0 / 火焰=1；火焰行 `1 有火`、蜂鸣器 `1 急促`、LED `3 红闪` |
-| 旧字段名 | `FIRECONTROL_JSON='{"start":1}{"fire_alarm":1,"smoker_alarm":1,"buzzer_alarm":2}{"end":1}'` | 别名被认：火焰 `1 有火`、烟雾 `1 有烟`、蜂鸣器 `2 缓慢` |
-| 不完整帧 | 先写 `{"start":1}{"temperature":3,` 启动 | **不发布**，接口页「收到的报文」显示"暂无"（或保留上一帧） |
-| 补齐后续 | 在上面文件里追加 `"fire_state":0}{"end":1}` | 200 ms 内出现完整帧，控制台打印一次 |
-| 坏帧后接新帧 | 写入 `{"start":1}{"temperature":9,{"start":1}{"temperature":2,"fire_state":0}{"end":1}` | 旧的不完整帧被忽略，只发布后一个完整帧 |
-| 非法 payload | `{"start":1}{"foo":1}{"end":1}`（只有未知字段） | 接口页报文显示，但报"没有已知字段"，程序不退出 |
-| 字段类型错 | `{"start":1}{"temperature":"hot"}{"end":1}` | 报"temperature 不是数字"，程序不退出 |
-| 逐路文件 | `FIRECONTROL_JSON_FILE_2=<完整帧文件>` 启动，进信息源 2 | 信息源 2 显示该帧；信息源 1/3 不显示它 |
+| 默认示例 | 直接在 `~/Desktop` 启动 | 普通页列出五个字段；接口页“收到的报文”是整条信封报文；五行按上面对应 |
+| 探测版原样报文 | `FIRECONTROL_JSON=<上面对那条>` 启动 | 五行与报文一致（`fire_alarm=1` → 火焰 `1 有火`） |
+| 扁平格式 | `FIRECONTROL_JSON='{"temperature":40,"fire_alarm":1,"buzzer_state":1,"led_state":3}'` | 没有 data 信封也认；火焰 `1 有火`、蜂鸣器 `1 急促`、LED `3 红闪` |
+| 旧字段名 | `FIRECONTROL_JSON='{"fire_state":1,"smoker_alarm":1,"buzzer_alarm":2}'` | 别名被认：火焰 `1 有火`、烟雾 `1 有烟`、蜂鸣器 `2 缓慢` |
+| 半个报文 | 先写 `{"header":"SENSOR_DATA","data":{"temperature":3,` 启动 | **不发布**，接口页显示"暂无"（或保留上一条） |
+| 补齐后续 | 在上面文件里追加 `"fire_alarm":0}}` | 200 ms 内出现报文，控制台打印一次 |
+| 头尾垃圾 | 在报文前后加 `AA 55 … 0D 0A` 或换行 | 仍能切出并解析（对象外字节被忽略） |
+| 多条连发 | 一次写两条完整报文 | 两条都发布（控制台两次） |
+| 非法 payload | `{"foo":1}`（只有未知字段） | 报"没有已知字段"，程序不退出 |
+| 字段类型错 | `{"temperature":"hot"}` | 报"temperature 不是数字"，程序不退出 |
+| 逐路文件 | `FIRECONTROL_JSON_FILE_2=<报文文件>` 启动，进信息源 2 | 信息源 2 显示该报文；信息源 1/3 不显示它 |
 
 > 2026-11 原生实测（伪终端串口，`/dev/pts/N` @115200）：两帧交替喂入，五行分别显示
 > `0 无烟 / 1 有火 / 36.5 阈值待定 / 1 急促 / 3 红闪` 和
@@ -415,7 +420,7 @@ DISPLAY=:0 wmctrl -lG
 | 列表枚举 | 点【刷新串口】 | 控制台打印 `串口列表已刷新 (N 个设备)`；下拉里出现 `/dev/tty*` |
 | 打开串口 | 选设备+波特率→【应用设置】 | 控制台 `信息源 N 应用串口: ... @ ... (已打开)`；状态变绿 |
 | 无界面配置 | `FIRECONTROL_SERIAL_1="/dev/ttyS0:115200" ./deffire-gui-dev` | 同上，且不用点界面 |
-| 伪终端代替硬件 | `socat -d -d pty,raw,echo=0 pty,raw,echo=0`，另开终端 `printf '%s' '<完整帧>' > /dev/pts/M` | 那一路上报报文 + 五行更新 |
+| 伪终端代替硬件 | `socat -d -d pty,raw,echo=0 pty,raw,echo=0`，另开终端 `printf '%s\r\n' '<报文>' > /dev/pts/M` | 那一路上报报文 + 五行更新 |
 | 拔线/断线 | 打开后拔掉 USB 转串口 | 控制台 `串口断开: ...（每秒自动重连）`；状态变 `未打开：...（每秒重连）` |
 | 重新插回 | 插回同一设备 | 1 秒内 `串口已重连: ...`，之后继续收帧 |
 | 非法波特率 | 用环境变量填 `xxx:12345` | 报"不支持的波特率"，不崩 |

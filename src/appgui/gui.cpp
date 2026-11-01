@@ -548,7 +548,7 @@ lv_obj_t *g_sensor_status = nullptr;
 lv_obj_t *g_sensor_values[5] = {};
 lv_obj_t *g_sensor_states[5] = {};
 
-// 最近一次收到的完整帧 (含 {"start":1} / {"end":1}), 显示在信息源页。
+// 最近一次收到的完整 JSON 对象原文, 显示在信息源页「收到的报文」。
 lv_obj_t *g_sensor_frame_label = nullptr;
 unsigned g_sensor_frame_revision = 0;
 int g_sensor_frame_source = -1;
@@ -914,11 +914,11 @@ void refreshJsonLabel()
             text += temperature;
             text += "  ";
         }
-        if (json.has_fire_state) {
-            text += "火焰=" + std::to_string(json.fire_state) + "  ";
+        if (json.has_fire_alarm) {
+            text += "火焰=" + std::to_string(json.fire_alarm) + "  ";
         }
-        if (json.has_smoke_state) {
-            text += "烟雾=" + std::to_string(json.smoke_state) + "  ";
+        if (json.has_smoke_alarm) {
+            text += "烟雾=" + std::to_string(json.smoke_alarm) + "  ";
         }
         if (json.has_buzzer_state) {
             text += "蜂鸣=" + std::to_string(json.buzzer_state) + "  ";
@@ -943,7 +943,7 @@ void refreshJsonLabel()
 }
 
 // 信息源页底部的"收到的报文": 每个信息源各自一份完整帧。
-// 只有 start/end 都到齐的帧才会更新; 还没接线的信息源显示"暂无"。
+// 只有收到完整 JSON 对象才更新; 还没接线的信息源显示"暂无"。
 void refreshSensorFrameLabel(bool force = false)
 {
     if (g_sensor_frame_label == nullptr) {
@@ -1018,18 +1018,18 @@ void refreshSensorData(bool force = false)
     };
     auto yesNoColor = [](int value) { return value == 0 ? kSensorOk : kSensorAccent; };
 
-    if (json.has_smoke_state) {
-        setSensorRow(0, true, std::to_string(json.smoke_state),
-                     yesNoText(json.smoke_state, "无烟", "有烟"),
-                     yesNoColor(json.smoke_state));
+    if (json.has_smoke_alarm) {
+        setSensorRow(0, true, std::to_string(json.smoke_alarm),
+                     yesNoText(json.smoke_alarm, "无烟", "有烟"),
+                     yesNoColor(json.smoke_alarm));
     } else {
         setSensorRow(0, false, "", "待接入", kSensorDim);
     }
 
-    if (json.has_fire_state) {
-        setSensorRow(1, true, std::to_string(json.fire_state),
-                     yesNoText(json.fire_state, "无火", "有火"),
-                     yesNoColor(json.fire_state));
+    if (json.has_fire_alarm) {
+        setSensorRow(1, true, std::to_string(json.fire_alarm),
+                     yesNoText(json.fire_alarm, "无火", "有火"),
+                     yesNoColor(json.fire_alarm));
     } else {
         setSensorRow(1, false, "", "待接入", kSensorDim);
     }

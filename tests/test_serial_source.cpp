@@ -99,10 +99,12 @@ int main()
     check(state.configured && state.opened, "状态: 已配置且已打开");
     check(state.device == slave_path && state.baud == 115200, "设备/波特率被记住");
 
-    // 一个完整帧: 走串口读线程 → json_source_feed → 切帧 → json_parse
+    // 一个完整报文 (探测版真实格式: 带 header/data/footer 信封 + 结尾 CRLF):
+    // 走串口读线程 → json_source_feed → 切 JSON 对象 → json_parse
     const std::string frame =
-        R"({"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":2,"led_state":3}{"end":1})";
-    check(writeAll(master, frame), "往串口写一个完整帧");
+        R"({"header":"SENSOR_DATA","data":{"temperature":36.5,"int_dev":1,"int_err":0,)"
+        R"("fire_alarm":1,"smoke_alarm":0,"led_state":3,"buzzer_state":2},"footer":"END"})";
+    check(writeAll(master, frame + "\r\n"), "往串口写一个完整报文");
     const bool got = waitUntil(
         [] { return firecontrol::json_status_for(kSource).has_frame; }, 3000);
     check(got, "串口线程把帧交到了这一路的状态里");
@@ -110,19 +112,23 @@ int main()
     firecontrol::JsonStatus json = firecontrol::json_status_for(kSource);
     check(json.valid, "串口帧解析成功");
     check(json.has_temperature && json.temperature == 36.5, "temperature=36.5");
-    check(json.has_fire_state && json.fire_state == 1, "fire_state=1");
-    check(json.has_smoke_state && json.smoke_state == 0, "smoke_state=0");
+    check(json.has_fire_alarm && json.fire_alarm == 1, "fire_alarm=1");
+    check(json.has_smoke_alarm && json.smoke_alarm == 0, "smoke_alarm=0");
     check(json.has_buzzer_state && json.buzzer_state == 2, "buzzer_state=2");
     check(json.has_led_state && json.led_state == 3, "led_state=3");
     check(json.frame == frame, "完整帧原文保留");
 
     // 半帧: 不该发布, 补齐后应该出帧 (跨两次 read 的拼接)
     const unsigned rev_before = firecontrol::json_status_for(kSource).revision;
-    check(writeAll(master, R"({"start":1}{"temperature":40.0,)"), "写半帧");
+    check(writeAll(master, R"({"header":"SENSOR_DATA","data":{"temperature":40.0,)"),
+          "写半个报文");
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     check(firecontrol::json_status_for(kSource).revision == rev_before,
-          "半帧没有发布");
-    check(writeAll(master, R"("fire_state":0}{"end":1})"), "补齐半帧");
+          "半个报文没有发布");
+    check(writeAll(master,
+                   R"("int_dev":0,"int_err":0,"fire_alarm":0,"smoke_alarm":0,)"
+                   R"("led_state":0,"buzzer_state":0},"footer":"END"})" "\r\n"),
+          "补齐半个报文");
     const bool merged = waitUntil(
         [] {
             return firecontrol::json_status_for(kSource).has_temperature &&

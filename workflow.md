@@ -29,7 +29,7 @@
 | JSON 解析（cJSON） | ✅ 原生构建 + 单测 | `temperature` / `fire_state` / `smoke_state` / `buzzer_state` / `led_state`（旧名 `*_alarm` 作别名、旧 `data`/`smoke` 兼容）；`test_json_status` 覆盖字段/类型/语法/空对象；字面量/文件来源已在控制台验证。见 §2.5 |
 | 串口来源 | ✅ 原生构建 + 单测（伪终端） | `serial_source.cpp`：每路设备+波特率、poll 线程、断线每秒重连；`test_serial_source` 覆盖打开/帧/断线/非法波特率。**板上真串口待接**，见 §2.6 |
 | 全屏 | ✅ 方案已定（交给 DE） | 不自己实现；按 EWMH 向 LXDE/Openbox 提交 `_NET_WM_STATE_FULLSCREEN` 请求（或配窗口规则），见 §2.2 |
-| 测试策略 | ✅ 手工验收 | 硬件 / GUI / 触摸以 VERIFY-RUNBOOK 为准；`ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame` / `serial_source`） |
+| 测试策略 | ✅ 手工验收 | 硬件 / GUI / 触摸以 VERIFY-RUNBOOK 为准；`ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_stream` / `serial_source`） |
 
 ---
 
@@ -185,50 +185,47 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 `~/下载/` 里那份官方 `main.c` 用的是"综合例程扩展板"的 GPIO 配置（3 个 LED、蜂鸣器走
 `EV_SND`），**和手上这块底板不是一回事** —— 可以看它怎么调 libgpiod，但引脚编号别照抄。
 
-### 2.5 JSON 状态（2026-10-31 起，2026-11 扩字段）
+### 2.5 报文格式与解析（2026-11 适配探测版）
 
 引入了 **cJSON 1.7.18**（`third_party/cjson`，MIT，随仓库提交，板上不需要另装
-`libcjson-dev`），解析传感器帧里的状态对象：
+`libcjson-dev`）。探测版模块发的是**带信封的一整条 JSON**，结尾 `\r\n`：
 
 ```text
-{"start":1} ...数据... {"end":1}
-{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
-{"data":1,"smoke":1}          # 旧格式, 仍然认
+{"header":"SENSOR_DATA","data":{"temperature":20.06,"int_dev":1,"int_err":0,
+ "fire_alarm":1,"smoke_alarm":0,"led_state":0,"buzzer_state":0},"footer":"END"}\r\n
 ```
 
-- `src/library/json_frame.cpp` 负责流式切帧：标记精确匹配、可处理半包、
-  不完整帧丢弃、新 `start` 出现时从新帧重开、单帧上限 8 KB；
-  `src/library/json_status.cpp` 只解析完整帧里的 payload。
-- `json_status.cpp` 认 5 个状态字段（名字同模块固件）：`temperature`（浮点）、
-  `fire_state`（0 无火/1 有火）、`smoke_state`（0 无烟/1 有烟）、
-  `buzzer_state`（0 灭/1 急促/2 缓慢/3 长响）、`led_state`（0 灭 … 7 红绿蓝轮转）；
-  旧名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作别名，旧的 `data`/`smoke` 也认。
-  其它字段忽略。蜂鸣器/LED 是模块自己驱动的状态机，app 只显示，不驱动本机硬件。
+- **不再要求 `{"start":1}` / `{"end":1}`**（2026-11 删除）：`src/library/json_stream.cpp`
+  从字节流里抠出 `{ ... }` 完整对象（花括号平衡算一条），对象之外的字节 —— 模块自己的
+  头/尾、`\r\n`、垃圾 —— 全部丢弃。分块到达、多条对象、字符串/转义/嵌套都能处理，
+  单条上限 8 KB。
+- 状态字段在 **`data` 子对象**里：有 `data` 对象就只从里面取，没有则按旧扁平格式从
+  根对象取。`header` / `footer` / `int_dev` / `int_err` 忽略。
+- 认 5 个状态字段：`temperature`（浮点）、`fire_alarm`（0 无火/1 有火）、
+  `smoke_alarm`（0 无烟/1 有烟）、`buzzer_state`（0 灭/1 急促/2 缓慢/3 长响）、
+  `led_state`（0 灭 … 7 红绿蓝轮转）。旧名 `fire_state` / `smoke_state` /
+  `smoker_alarm` / `buzzer_alarm` 作别名，旧的 `data`/`smoke` 也认。
+  蜂鸣器/LED 是模块自己驱动的状态机，app 只显示，不驱动本机硬件。
 - **字段全部可选**：缺字段不算错（对应 `has_xxx=false`），一个已知字段都没有才失败
   （`error="没有已知字段"`）；字段存在但不是数字才失败（如"temperature 不是数字"）。
-  根节点不是对象、语法错误同样 `valid=false`。
+- 如果模块仍然发 `{"start":1}` / `{"end":1}`：它们也是合法对象，但没有已知字段，
+  会被**静默跳过**（不会在界面报“未识别”）。
 - 数据来源优先级：`FIRECONTROL_JSON` 字面量 > `FIRECONTROL_JSON_FILE` 文件 >
-  当前目录 `firecontrol.json`（存在才用）> 内置示例帧 > **串口**（§2.6，真实来源）。
-- 文件来源每 200 ms 检查一次：内容没变不重复喂；追加只喂新增后缀；重写则重置解析器；
-  之前在帧模式但重写内容没有 `start` 时保留上一帧，按不完整处理。
-- 每个信息源有独立的 `JsonFrameParser` / `JsonStatus`；接口页「收到的报文」只显示
-  当前信息源的完整帧，不再共享。串口线程调 `json_source_feed(index, data, len)`，
-  index=0..11；断线重连调 `json_source_reset(index)`。
-- **报文头/尾归发送方（模块），app 只解析、不添加**：解析器丢弃 start 之前的字节、从不写
-  标记；app 自己唯一的成品帧是没配置来源时的内置示例帧（占位，不是协议）。所以"模块自带
-  头/尾"不需要我们在 app 里补一步 —— 要做的只有让 `json_frame.h` 的 `kFrameStart` /
-  `kFrameEnd` 等于模块实际发的字节。这两个值现在写死为 `{"start":1}` / `{"end":1}`，
-  **尚未与模块实测比对**；对不上会静默"暂无"（不报错）。
-- 文件来源接受整段 JSON、字节流必须带 start/end，这个不对称是**有意的**：文件内容天然有
-  消息边界，字节流没有，不靠分隔符切不出来。
-- 测试：`tests/test_json_status.cpp` + `tests/test_json_frame.cpp`；原生 `ctest` 4/4
+  当前目录 `firecontrol.json`（存在才用）> 内置示例报文 > **串口**（§2.6，真实来源）。
+- 文件来源每 200 ms 检查一次：内容没变不重复喂；追加只喂新增后缀；重写则重置切分器。
+- 每个信息源有独立的 `JsonObjectSplitter` / `JsonStatus`；接口页「收到的报文」只显示
+  当前信息源的对象原文。串口线程调 `json_source_feed(index, data, len)`，index=0..11；
+  断线重连调 `json_source_reset(index)`。
+- **报文头/尾归发送方（模块），app 只解析、不添加**：切分器从不写标记，app 自己唯一的
+  成品报文是没配置来源时的内置示例（占位，不是协议）。因为只认 `{...}`，**不需要再和
+  模块核对任何标记字节**。
+- 测试：`tests/test_json_status.cpp` + `tests/test_json_stream.cpp`；原生 `ctest` 4/4
   （含 §2.6 的串口测试）。
-- **还没做**报警判定/联动：帧进得来、完整帧看得见、五行填得上；但没有根据
-  `fire_state` / `smoke_state` / `temperature` 驱动本机蜂鸣器/LED（模块侧状态只显示），
-  温度阈值也未定。
+- **还没做**报警判定/联动：报文进得来、五行填得上；但没有根据 `fire_alarm` /
+  `smoke_alarm` / `temperature` 驱动本机蜂鸣器/LED（模块侧状态只显示），温度阈值也未定。
 - cJSON 静态编入产物：板上**不需要**装 `libcjson`/`libcjson-dev`，也不需要重建
   armhf 工具链镜像；正常 `./build.sh gui-armhf` 后把 `build-armhf/deffire-gui-dev`
-  拷到板上即可（`Dockerfile.build-armhf` 已经 `COPY third_party/`）。
+   拷到板上即可（`Dockerfile.build-armhf` 已经 `COPY third_party/`）。
 
 ### 2.6 串口来源（2026-11）
 
@@ -306,7 +303,7 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 - **开发机跑不了 armhf 产物**（架构不同 + 需要板上的 libX11），必须 scp 到板上跑。
 - **板上不编译**：一切从开发机交叉编译后推过去，产物统一放板上 `~/Desktop`。
 - **测试以手工验收为主**：硬件 / GUI / 触摸走 [VERIFY-RUNBOOK.md](VERIFY-RUNBOOK.md) 的逐项判据；
-  `ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_frame`）。不追求把硬件行为 mock 成自动化测试 ——
+  `ctest` 只覆盖纯逻辑层（当前 `greeting` / `json_status` / `json_stream`）。不追求把硬件行为 mock 成自动化测试 ——
   那种测试证明不了板上的事。
 - **`~/下载/` 里的正点原子资料别照抄**：`main.c` 是"综合例程扩展板"的配置（3 个 LED、
   蜂鸣器走 `EV_SND`），**不是手上这块底板**（1 个 LED + 1 个蜂鸣器，都在

@@ -253,11 +253,11 @@ int status()
                               json.temperature);
                 line += temperature;
             }
-            if (json.has_fire_state) {
-                line += "fire_state=" + std::to_string(json.fire_state) + "  ";
+            if (json.has_fire_alarm) {
+                line += "fire_alarm=" + std::to_string(json.fire_alarm) + "  ";
             }
-            if (json.has_smoke_state) {
-                line += "smoke_state=" + std::to_string(json.smoke_state) + "  ";
+            if (json.has_smoke_alarm) {
+                line += "smoke_alarm=" + std::to_string(json.smoke_alarm) + "  ";
             }
             if (json.has_buzzer_state) {
                 line += "buzzer_state=" + std::to_string(json.buzzer_state) + "  ";

@@ -1,7 +1,7 @@
 #include "json_status.h"
 
 #include "cJSON.h"
-#include "json_frame.h"
+#include "json_stream.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,8 +17,9 @@ namespace firecontrol
 namespace
 {
 constexpr const char *kSampleFrame =
-    R"({"start":1}{"temperature":25.5,"fire_state":0,"smoke_state":0,)"
-    R"("buzzer_state":0,"led_state":0}{"end":1})";
+    R"({"header":"SENSOR_DATA","data":{"temperature":20.06,"int_dev":1,)"
+    R"("int_err":0,"fire_alarm":0,"smoke_alarm":0,"led_state":0,)"
+    R"("buzzer_state":0},"footer":"END"})";
 
 constexpr const char *kErrEmpty = "JSON 为空";
 constexpr const char *kErrFileOpen = "打不开 JSON 文件";
@@ -26,11 +27,12 @@ constexpr const char *kErrFileRead = "读 JSON 文件失败";
 constexpr const char *kErrSyntax = "JSON 语法错误";
 constexpr const char *kErrNotObject = "根节点不是对象";
 constexpr const char *kErrNoFields = "没有已知字段";
-constexpr const char *kErrDataNotNumber = "data 不是数字";
+constexpr const char *kErrDataBadType = "data 不是对象/数字";
 constexpr const char *kErrSmokeNotNumber = "smoke 不是数字";
 constexpr const char *kErrTemperatureNotNumber = "temperature 不是数字";
 constexpr const char *kErrFireStateNotNumber = "fire_state 不是数字";
 constexpr const char *kErrSmokeStateNotNumber = "smoke_state 不是数字";
+constexpr const char *kErrSmokeAlarmNotNumber = "smoke_alarm 不是数字";
 constexpr const char *kErrBuzzerStateNotNumber = "buzzer_state 不是数字";
 constexpr const char *kErrLedStateNotNumber = "led_state 不是数字";
 // 旧字段名 (别名) 的类型错误分开写, 报错时能和实际发的键对上
@@ -39,14 +41,16 @@ constexpr const char *kErrSmokerAlarmNotNumber = "smoker_alarm 不是数字";
 constexpr const char *kErrBuzzerAlarmNotNumber = "buzzer_alarm 不是数字";
 
 // 每个信息源一路独立输入。串口读取线程调 json_source_feed() 喂字节,
-// 文件来源 (测试用) 也走同一套 parser/status。
+// 文件来源 (测试用) 也走同一套 splitter/status。
+//
+// **不再有 start/end 切帧**: 模块自己带完整报文, app 只从字节流里抠出
+// `{...}` 完整 JSON 对象 (见 json_stream.h)。
 struct SourceState {
     JsonStatus status;
-    JsonFrameParser parser;
+    JsonObjectSplitter splitter;
     std::string file_path;
     std::string last_file_content;
     bool from_file = false;
-    bool framed_mode = false;
     bool file_error = false;
 };
 
@@ -66,9 +70,9 @@ bool sameValues(const JsonStatus &a, const JsonStatus &b)
     return a.valid == b.valid && a.has_data == b.has_data &&
            a.has_smoke == b.has_smoke && a.data == b.data && a.smoke == b.smoke &&
            a.has_temperature == b.has_temperature && a.temperature == b.temperature &&
-           a.has_fire_state == b.has_fire_state && a.fire_state == b.fire_state &&
-           a.has_smoke_state == b.has_smoke_state &&
-           a.smoke_state == b.smoke_state &&
+           a.has_fire_alarm == b.has_fire_alarm && a.fire_alarm == b.fire_alarm &&
+           a.has_smoke_alarm == b.has_smoke_alarm &&
+           a.smoke_alarm == b.smoke_alarm &&
            a.has_buzzer_state == b.has_buzzer_state &&
            a.buzzer_state == b.buzzer_state &&
            a.has_led_state == b.has_led_state && a.led_state == b.led_state &&
@@ -124,63 +128,33 @@ int readTextFile(const char *path, std::string *out, const char **error)
     return 0;
 }
 
-bool hasStartMarker(const std::string &text)
-{
-    return text.find(kFrameStart) != std::string::npos;
-}
-
-std::string extractPayload(const std::string &frame)
-{
-    const std::string start(kFrameStart);
-    const std::string end(kFrameEnd);
-    const std::size_t s = frame.find(start);
-    const std::size_t e = frame.rfind(end);
-    if (s == std::string::npos || e == std::string::npos ||
-        e < s + start.size()) {
-        return {};
-    }
-    return frame.substr(s + start.size(), e - (s + start.size()));
-}
-
-int processFrames(SourceState &src)
+// 解析这一路切出来的每条完整对象; 返回发布了几条。
+//
+// 模块自己的报文头/尾 (比如 {"start":1}) 本身也是合法 JSON 对象, 但里面没有已知
+// 字段 —— 这种**静默跳过**, 不往界面上报"未识别"。
+int processObjects(SourceState &src)
 {
     int count = 0;
-    std::string frame;
-    while (src.parser.pop(frame)) {
+    std::string object;
+    while (src.splitter.pop(object)) {
         JsonStatus st;
-        const std::string payload = extractPayload(frame);
-        json_parse(payload.c_str(), &st);
+        json_parse(object.c_str(), &st);
+        if (!st.valid && sameError(st.error, kErrNoFields)) {
+            continue;
+        }
         st.has_frame = true;
-        st.frame = frame;
+        st.frame = object;
         publish(src, std::move(st), true);
         count++;
     }
     return count;
 }
 
-int applyLegacyText(SourceState &src, const std::string &text)
+int feedWholeText(SourceState &src, const std::string &text)
 {
-    JsonStatus st;
-    const int rc = json_parse(text.c_str(), &st);
-    st.has_frame = true;
-    st.frame = text;
-    publish(src, std::move(st), true);
-    return rc;
-}
-
-int feedWholeText(SourceState &src, const std::string &text, bool allow_legacy)
-{
-    src.parser.reset();
-    if (hasStartMarker(text)) {
-        src.framed_mode = true;
-        src.parser.feed(text);
-        return processFrames(src) > 0 ? 0 : -1;
-    }
-    if (allow_legacy) {
-        src.framed_mode = false;
-        return applyLegacyText(src, text);
-    }
-    return -1;
+    src.splitter.reset();
+    src.splitter.feed(text);
+    return processObjects(src) > 0 ? 0 : -1;
 }
 
 void publishFileError(SourceState &src, const char *error)
@@ -205,7 +179,7 @@ int initSourceFromFile(SourceState &src, const char *path)
     }
     src.file_error = false;
     src.last_file_content = text;
-    return feedWholeText(src, text, true);
+    return feedWholeText(src, text);
 }
 
 int refreshSourceFile(SourceState &src)
@@ -225,35 +199,34 @@ int refreshSourceFile(SourceState &src)
     if (src.file_error) {
         src.file_error = false;
         src.last_file_content = text;
-        return feedWholeText(src, text, !src.framed_mode);
+        return feedWholeText(src, text);
     }
 
     if (text == src.last_file_content) {
         return 0;
     }
 
-    if (src.framed_mode && hasStartMarker(text) &&
-        text.size() >= src.last_file_content.size() &&
+    // 追加 (新内容以旧内容为前缀): 只喂新增后缀, 跨刷新被切开的半个对象能接上。
+    if (text.size() >= src.last_file_content.size() &&
         text.compare(0, src.last_file_content.size(), src.last_file_content) == 0) {
         const std::size_t old_size = src.last_file_content.size();
         src.last_file_content = text;
-        src.parser.feed(text.data() + old_size, text.size() - old_size);
-        return processFrames(src) > 0 ? 0 : -1;
+        src.splitter.feed(text.data() + old_size, text.size() - old_size);
+        return processObjects(src) > 0 ? 0 : -1;
     }
 
-    const bool allow_legacy = !src.framed_mode;
+    // 重写: 重置后整段重喂。
     src.last_file_content = text;
-    return feedWholeText(src, text, allow_legacy);
+    return feedWholeText(src, text);
 }
 
 void resetSource(SourceState &src)
 {
     src.status = JsonStatus{};
-    src.parser.reset();
+    src.splitter.reset();
     src.file_path.clear();
     src.last_file_content.clear();
     src.from_file = false;
-    src.framed_mode = false;
     src.file_error = false;
 }
 } // namespace
@@ -289,6 +262,24 @@ int json_parse(const char *text, JsonStatus *out)
         return fail(kErrNotObject);
     }
 
+    // 报文信封: {"header":"SENSOR_DATA","data":{...},"footer":"END"}\r\n。
+    // 有 data 对象就只从它里面取字段; 没有则按旧的扁平格式从根对象取。
+    // data 是数字时是更早的格式 {"data":1,"smoke":1}, 照旧认。
+    const cJSON *body = root;
+    {
+        const cJSON *data_item = cJSON_GetObjectItemCaseSensitive(root, "data");
+        if (data_item != nullptr) {
+            if (cJSON_IsObject(data_item)) {
+                body = data_item;
+            } else if (cJSON_IsNumber(data_item)) {
+                out->has_data = true;
+                out->data = static_cast<int>(data_item->valuedouble);
+            } else {
+                return fail(kErrDataBadType);
+            }
+        }
+    }
+
     // 已知字段全是可选的: 缺字段不算错 (模块可能只发它有的那几个),
     // 存在但不是数字才算失败。
     bool ok = true;
@@ -296,7 +287,7 @@ int json_parse(const char *text, JsonStatus *out)
         if (!ok) {
             return;
         }
-        cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(body, name);
         if (item == nullptr) {
             return;
         }
@@ -309,29 +300,36 @@ int json_parse(const char *text, JsonStatus *out)
         *value = static_cast<int>(item->valuedouble);
     };
 
-    // 同一个字段两个键名: 模块固件的名字优先, 旧协议名作别名兜底。
-    auto readIntFirst = [&](const char *name, const char *alias, bool *has, int *value,
-                            const char *name_error, const char *alias_error) {
-        readInt(name, has, value, name_error);
-        if (ok && !*has) {
-            readInt(alias, has, value, alias_error);
-        }
-    };
-
-    readInt("data", &out->has_data, &out->data, kErrDataNotNumber);
+    // 模块现在用的键名优先; 旧键名作别名兜底 (字段全部可选, 谁先出现用谁)。
     readInt("smoke", &out->has_smoke, &out->smoke, kErrSmokeNotNumber);
-    readIntFirst("fire_state", "fire_alarm", &out->has_fire_state, &out->fire_state,
-                 kErrFireStateNotNumber, kErrFireAlarmNotNumber);
-    readIntFirst("smoke_state", "smoker_alarm", &out->has_smoke_state,
-                 &out->smoke_state, kErrSmokeStateNotNumber,
-                 kErrSmokerAlarmNotNumber);
-    readIntFirst("buzzer_state", "buzzer_alarm", &out->has_buzzer_state,
-                 &out->buzzer_state, kErrBuzzerStateNotNumber,
-                 kErrBuzzerAlarmNotNumber);
-    readInt("led_state", &out->has_led_state, &out->led_state, kErrLedStateNotNumber);
+    readInt("fire_alarm", &out->has_fire_alarm, &out->fire_alarm,
+            kErrFireAlarmNotNumber);
+    if (ok && !out->has_fire_alarm) {
+        readInt("fire_state", &out->has_fire_alarm, &out->fire_alarm,
+                kErrFireStateNotNumber);
+    }
+    readInt("smoke_alarm", &out->has_smoke_alarm, &out->smoke_alarm,
+            kErrSmokeAlarmNotNumber);
+    if (ok && !out->has_smoke_alarm) {
+        readInt("smoker_alarm", &out->has_smoke_alarm, &out->smoke_alarm,
+                kErrSmokerAlarmNotNumber);
+    }
+    if (ok && !out->has_smoke_alarm) {
+        readInt("smoke_state", &out->has_smoke_alarm, &out->smoke_alarm,
+                kErrSmokeStateNotNumber);
+    }
+    readInt("buzzer_state", &out->has_buzzer_state, &out->buzzer_state,
+            kErrBuzzerStateNotNumber);
+    if (ok && !out->has_buzzer_state) {
+        readInt("buzzer_alarm", &out->has_buzzer_state, &out->buzzer_state,
+                kErrBuzzerAlarmNotNumber);
+    }
+    readInt("led_state", &out->has_led_state, &out->led_state,
+            kErrLedStateNotNumber);
 
     if (ok) {
-        cJSON *temperature = cJSON_GetObjectItemCaseSensitive(root, "temperature");
+        const cJSON *temperature =
+            cJSON_GetObjectItemCaseSensitive(body, "temperature");
         if (temperature != nullptr) {
             if (!cJSON_IsNumber(temperature)) {
                 out->error = kErrTemperatureNotNumber;
@@ -350,7 +348,7 @@ int json_parse(const char *text, JsonStatus *out)
     // 不要假装 valid。
     const bool any_known =
         out->has_data || out->has_smoke || out->has_temperature ||
-        out->has_fire_state || out->has_smoke_state || out->has_buzzer_state ||
+        out->has_fire_alarm || out->has_smoke_alarm || out->has_buzzer_state ||
         out->has_led_state;
     if (!any_known) {
         return fail(kErrNoFields);
@@ -390,7 +388,7 @@ int json_status_init()
 
     const char *literal = std::getenv("FIRECONTROL_JSON");
     if (literal != nullptr && *literal != '\0') {
-        rc = feedWholeText(g_sources[0], literal, true);
+        rc = feedWholeText(g_sources[0], literal);
     } else {
         const char *file_env = std::getenv("FIRECONTROL_JSON_FILE");
         const bool explicit_file = (file_env != nullptr && *file_env != '\0');
@@ -405,7 +403,7 @@ int json_status_init()
             publishFileError(g_sources[0], kErrFileOpen);
             rc = -1;
         } else {
-            rc = feedWholeText(g_sources[0], kSampleFrame, true);
+            rc = feedWholeText(g_sources[0], kSampleFrame);
         }
     }
 
@@ -445,8 +443,8 @@ int json_source_feed(int source_index, const char *data, std::size_t len)
 
     std::lock_guard<std::mutex> lock(g_mutex);
     SourceState &src = g_sources[source_index];
-    src.parser.feed(data, len);
-    return processFrames(src);
+    src.splitter.feed(data, len);
+    return processObjects(src);
 }
 
 void json_source_reset(int source_index)
@@ -457,7 +455,7 @@ void json_source_reset(int source_index)
 
     std::lock_guard<std::mutex> lock(g_mutex);
     SourceState &src = g_sources[source_index];
-    src.parser.reset();
+    src.splitter.reset();
     JsonStatus empty;
     empty.revision = src.status.revision + 1;
     src.status = std::move(empty);

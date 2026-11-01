@@ -66,7 +66,7 @@ target_compile_options(cjson PRIVATE -w)
 # 而且这一层可以交叉编译到 armhf (不依赖任何平台特有库)。
 #
 # 目录分工:
-#   include/      对外头文件   (greeting.h / start.h / usetools.h / hardware_path.h / json_status.h / serial_source.h)
+#   include/      对外头文件   (greeting.h / start.h / usetools.h / hardware_path.h / json_status.h / json_stream.h / serial_source.h)
 #   src/library/  静态库实现   → libfirecontrol.a
 #   src/source/   程序入口     (main.cpp)
 #   src/appgui/   界面实现     (gui.cpp 真界面 / gui_stub.cpp 无界面版)
@@ -78,7 +78,7 @@ add_library(firecontrol
     src/library/greeting.cpp
     src/library/usetools.cpp
     src/library/start.cpp
-    src/library/json_frame.cpp
+    src/library/json_stream.cpp
     src/library/json_status.cpp
     src/library/serial_source.cpp
 )
@@ -362,10 +362,10 @@ if(BUILD_TESTING)
 
         add_test(NAME json_status COMMAND test_json_status)
 
-        add_executable(test_json_frame tests/test_json_frame.cpp)
-        target_link_libraries(test_json_frame PRIVATE firecontrol)
+        add_executable(test_json_stream tests/test_json_stream.cpp)
+        target_link_libraries(test_json_stream PRIVATE firecontrol)
 
-        add_test(NAME json_frame COMMAND test_json_frame)
+        add_test(NAME json_stream COMMAND test_json_stream)
 
         # 串口来源: 用伪终端冒充串口, 不需要真硬件 (Linux only)。
         add_executable(test_serial_source tests/test_serial_source.cpp)

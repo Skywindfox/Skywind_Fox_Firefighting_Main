@@ -14,7 +14,7 @@ FireControlApp/
 ├── include/            对外头文件 —— 库与程序都只从这里 include
 │   ├── greeting.h        纯逻辑层
 │   ├── hardware_path.h   板上 sysfs 路径常量 (LED / 蜂鸣器)
-│   ├── json_frame.h      start/end 帧解析 (流式、可处理半包)
+│   ├── json_stream.h     从字节流里切完整 JSON 对象 (跳过报文头/尾)
 │   ├── json_status.h     JSON 状态 (temperature / *_alarm, 兼容 data/smoke)
 │   ├── serial_source.h   串口来源 (设备枚举 / 波特率 / 读取线程)
 │   ├── start.h           骨架: 四个阶段 + 程序级全局量
@@ -22,7 +22,7 @@ FireControlApp/
 ├── src/
 │   ├── library/        静态库实现 → libfirecontrol.a
 │   │   ├── greeting.cpp  纯逻辑
-│   │   ├── json_frame.cpp start/end 帧解析
+│   │   ├── json_stream.cpp 切完整 JSON 对象
 │   │   ├── json_status.cpp cJSON 解析 payload 字段
 │   │   ├── serial_source.cpp termios 打开 + poll 线程 + 断线重连
 │   │   ├── start.cpp     唯一主循环 + 板载 LED/蜂鸣器 + 外部蜂鸣器线程
@@ -288,7 +288,7 @@ sudo reboot
 - **LED 与蜂鸣器是模块侧状态机**：`buzzer_state`（灭/急促/缓慢/长响）和
   `led_state`（灭/蓝闪/绿闪/红闪/蓝绿/蓝红/绿红/轮转）由模块自己驱动，app 只显示，
   **不**用它们去驱动本机蜂鸣器/LED。
-  收到完整帧后，报文行显示原始 `{"start":1}...{"end":1}`，长报文可滚动/换行。
+  收到完整对象后，报文行显示整条 JSON 原文（含 header/data/footer 信封），长报文可滚动/换行。
 - **界面配色**：普通页仍是近黑+安全琥珀；信息源覆盖层改用深蓝灰底 + 琥珀/橙描边
   （`kSensorBg` / `kSensorPanel` / `kSensorLine` / `kSensorText`），只作用于接口页。
 - **下拉框细节**：列表是懒创建的，配色在 `LV_EVENT_READY` 里设；默认的
@@ -423,25 +423,28 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
 - **默认按屏幕尺寸建窗口**：无参数时窗口按屏幕实际尺寸建；板上跑着 Openbox，
   是否铺满由 DE 决定（见 §3 与 [workflow.md](workflow.md) §2.2）。
 
-### 8.1 JSON 状态
+### 8.1 JSON 状态（探测版报文）
 
 `src/library/json_status.cpp` 用 **cJSON 1.7.18**（`third_party/cjson`，MIT）解析传感器模块
-上报的状态对象（字段名就是模块固件里的变量名）：
+（探测版）上报的报文。模块实际发的是带信封的一整条 JSON：
 
 ```json
-{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}
+{"header":"SENSOR_DATA","data":{"temperature":20.06,"int_dev":1,"int_err":0,"fire_alarm":1,"smoke_alarm":0,"led_state":0,"buzzer_state":0},"footer":"END"}\r\n
 ```
+
+- 状态字段在 **`data` 子对象**里：有 `data` 对象就只从里面取；没有则按旧扁平格式从根对象取。
+- `header` / `footer` / `int_dev` / `int_err` 一律忽略（信封和模块调试字段）。
 
 | 字段 | 含义 |
 |---|---|
 | `temperature` | 温度值（浮点，单位由模块定，app 原样显示） |
-| `fire_state` | `0` 无火 / `1` 有火 |
-| `smoke_state` | `0` 无烟 / `1` 有烟 |
+| `fire_alarm` | `0` 无火 / `1` 有火 |
+| `smoke_alarm` | `0` 无烟 / `1` 有烟 |
 | `buzzer_state` | `0` 灭 / `1` 急促（100 ms 响、100 ms 停）/ `2` 缓慢（500 ms）/ `3` 长响 |
 | `led_state` | 三色 LED 状态机：`0` 灭、`1` 蓝闪（仅烟）、`2` 绿闪（仅温）、`3` 红闪（仅火）、`4` 蓝↔绿（烟+温）、`5` 蓝↔红（烟+火）、`6` 绿↔红（温+火）、`7` 红→绿→蓝（三路全报） |
 
-- 旧协议名 `fire_alarm` / `smoker_alarm` / `buzzer_alarm` 作为**别名**仍然认（映射到
-  同一组状态字段）；旧的 `data` / `smoke` 也保留兼容（内置示例帧、旧文件、老测试用）。
+- 旧字段名 `fire_state` / `smoke_state` / `smoker_alarm` / `buzzer_alarm` 作为**别名**仍然认；
+  更早的 `{"data":1,"smoke":1}` 也保留兼容（`data` 是数字时按旧字段处理）。
 - 蜂鸣器/LED 是**模块自己驱动的状态机**，app 只显示，不重算、不驱动本机蜂鸣器/LED。
 - 字段**全部可选**：模块只发其中几个也算成功，缺的字段 `has_xxx=false`；
   一个已知字段都没有才失败（`error="没有已知字段"`）。
@@ -452,107 +455,85 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
   1. `FIRECONTROL_JSON` 环境变量里的字面量（调试最方便）；
   2. `FIRECONTROL_JSON_FILE` 指定的文件；
   3. 当前目录的 `firecontrol.json`（存在才用；板上按 `cd ~/Desktop` 启动时就是它）；
-  4. 内置示例帧
-     `{"start":1}{"temperature":25.5,"fire_state":0,"smoke_state":0,"buzzer_state":0,"led_state":0}{"end":1}`。
+  4. 内置示例报文（同样是信封格式，全 0、温度 20.06）；
   5. **串口**（真实来源，见 §8.3）：界面里选设备/波特率，或 `FIRECONTROL_SERIAL_<N>`。
 
 默认文件是相对**当前工作目录**的；从别的目录启动就找不到它，用
 `FIRECONTROL_JSON_FILE=/绝对路径`，或先 `cd ~/Desktop` 再启动。
 - 来源是文件时，`status()` 每 200 ms 重读一次；只有值/错误变化才递增 `revision`，
   GUI 只在 `revision` 变化时重设标签，不会每帧触发重排。
-- 控制台在变化时打印 `--- JSON 状态 ---` + `完整报文: ...` + 这一帧里有的字段
-  （`temperature=36.5  fire_state=1  ...`，只打有的，不补 0）。
+- 控制台在变化时打印 `--- JSON 状态 ---` + `完整报文: ...` + 这一条里有的字段
+  （`temperature=20.06  fire_alarm=1  ...`，只打有的，不补 0）。
 - 界面：内容区页名下面一行列出有的字段；失败显示 `JSON 未识别 (...)`。
-  信息源页底部还有一行 `收到的报文：...`，只在收到完整帧后更新。
+  信息源页底部「收到的报文」显示整条 JSON 原文（含信封），只在收到完整对象后更新。
 
 示例：
 
 ```bash
-# 字面量 (完整帧)
-FIRECONTROL_JSON='{"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}{"end":1}' \
+# 字面量: 直接用探测版的报文格式
+FIRECONTROL_JSON='{"header":"SENSOR_DATA","data":{"temperature":36.5,"fire_alarm":1,"smoke_alarm":0,"led_state":3,"buzzer_state":2},"footer":"END"}' \
   ./build/deffire-gui-dev
 
 # 文件（运行时追加/重写，界面 200 ms 内跟着变）
-echo '{"start":1}{"temperature":36.5,"fire_state":1,"led_state":2}{"end":1}' > firecontrol.json
+echo '{"header":"SENSOR_DATA","data":{"temperature":20.06,"fire_alarm":0},"footer":"END"}' > firecontrol.json
 ./build/deffire-gui-dev
 
 # 串口: 板上直接填设备路径; 开发机上用 socat 造一对伪终端 (见 §8.3)
 socat -d -d pty,raw,echo=0 pty,raw,echo=0        # 输出两条 /dev/pts/N, M
 FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/deffire-gui-dev
-# 另一个终端往 /dev/pts/M 写帧:
-printf '%s' '{"start":1}{"temperature":36.5,"fire_state":1,"smoke_state":0,"buzzer_state":1,"led_state":3}{"end":1}' > /dev/pts/M
+# 另一个终端往 /dev/pts/M 写报文:
+printf '%s\r\n' '{"header":"SENSOR_DATA","data":{"temperature":36.5,"fire_alarm":1,"smoke_alarm":0,"led_state":3,"buzzer_state":2},"footer":"END"}' > /dev/pts/M
 ```
 
-当前它**只是解析/显示**：还没有根据 `fire_state` / `smoke_state` / `temperature` 做报警
+当前它**只是解析/显示**：还没有根据 `fire_alarm` / `smoke_alarm` / `temperature` 做报警
 判定或联动（蜂鸣器/LED 是模块侧状态机，app 只显示），板上真串口也待接。
 
 cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不会出现
 `libcjson.so`，板上不需要装 cJSON；按原来的“本机交叉编译 → 拷到板上”流程即可。
 
-### 8.2 JSON 帧与鲁棒性
+### 8.2 报文切分与鲁棒性
 
-传感器端定义的帧：
-
-```text
-{"start":1} ...数据... {"end":1}
-```
+**不再要求 `{"start":1}` / `{"end":1}`**（2026-11 删除）：模块自己带完整的报文头/尾，
+app 只从字节流里抠出 **`{ ... }` 完整 JSON 对象**，花括号平衡就算一条；对象之外的字节
+（模块自己的头/尾、`\r\n`、垃圾）一律丢弃。
 
 实现拆成两块：
 
-- `src/library/json_frame.cpp`：纯流式帧解析，不依赖 cJSON，可单独测试；
-- `src/library/json_status.cpp`：把完整帧里的 payload 交给 cJSON 解析。
+- `src/library/json_stream.cpp` + `include/json_stream.h`：纯流式切分，不依赖 cJSON，可单独测试；
+- `src/library/json_status.cpp`：把切出来的对象交给 cJSON 解析（并处理 `data` 子对象）。
 
-`JsonFrameParser` 的行为：
+`JsonObjectSplitter` 的行为：
 
-- 只按**精确字节**匹配 `{"start":1}` / `{"end":1}`；
-- `feed()` 可以一次给一段，标记被拆到两个 chunk 也能接上；
-- 没看到 `start` 之前的数据全部丢弃；
-- 看到 `start` 后如果又出现新的 `start`（旧帧没有 `end`），**丢弃旧帧，从新 start 重新收集**；
-- 收到完整 `start...end` 才 `pop()` 出一个帧；
-- 单帧超过 8 KB 就丢掉当前帧，等下一个 start，防止缓冲区无限增长；
-- 一次 feed 里可以切出多个完整帧。
-- 标记按精确字节匹配，payload 的字符串里**不要**出现 `{"start":1}` / `{"end":1}`
-  这组字面量，否则会被误切。
+- 只认 `{` / `}`；**字符串里的括号和转义 `\"` 不算**，嵌套对象按最外层闭合；
+- `feed()` 可以一次给一段，对象被拆到两个 chunk 也能接上；
+- 一次 feed 里可以切出多条完整对象；
+- 单个对象超过 **8 KB** 就丢掉，从下一个 `{` 重新开始（防缓冲区无限涨）；
+- 对象之前的字节全部丢弃 —— 所以模块发 `AA 55 {…} 0D 0A` 或直接 `{…}\r\n` 都能切；
+- 兼容：如果模块仍然发 `{"start":1}` / `{"end":1}`，它们也是合法对象，但里面没有已知
+  字段 —— 会被**静默跳过**，不会在界面上报“未识别”。
 
 **谁产生报文头/尾（约定，2026-10-31 明确）**：
 
-- 头/尾归**发送方（传感器模块）**：app 只解析、不添加。`JsonFrameParser` 收到 start 之前
-  的字节直接丢弃，解析器本身从不写标记；`extractPayload()` 只是把标记切掉。
-- app 里唯一自己产出的成品帧是 `json_status.cpp` 的 `kSampleFrame`（没配置来源时的占位
-  示例，比如 `FIRECONTROL_JSON` 不设、`./firecontrol.json` 不存在时），它**不参与真实
-  数据**；除它之外没有任何地方拼帧、补头补尾。
-- 因此"模块已经自带报文头/尾"**不需要**我们在 app 里再做一步：要做的只有让
-  `json_frame.h` 的 `kFrameStart` / `kFrameEnd` 等于模块**实际发送**的字节。
-- ⚠ 这两个值现在**写死**为 `{"start":1}` / `{"end":1}`，还没与模块实测比对。对不上时不会
-  报错 —— 整路永远"暂无"（字节全在 start 之前被丢掉），所以接模块前必须先确认字节。
-- **有意的不对称**：文件来源接受整段 JSON（`feedWholeText()` 的 legacy 分支 —— 文件内容
-  天然就是一条完整消息，有边界，不需要分隔符）；字节流（`json_source_feed()`）则必须带
-  start/end —— 流没有消息边界，不靠分隔符切不出消息。等模块协议确定后二选一：用它的
-  头/尾切，或者由传输层保证"一次读 = 一条完整报文"，**不要两头都猜**。
-- 另一个待确认的接口层问题：接口页右栏选的是 **GPIO 端口 + 线号**（对应
-  `gpio_read_value()`，开关量 0/1），而 `json_source_feed()` 收的是 **JSON 字节流**；
-  两者之间目前没有桥，且 `json_source_feed()` **没有调用点**（【应用设置】只保存选择）。
-  接硬件前要定：模块是把整条报文当字节流送进来（串口/其它总线），还是只有开关量电平
-  —— 后者的话根本不会有 JSON，五行数据要按电平算。
-- **发送方向**：app 现在**没有**任何向传感器发报文的代码（`gpio_write_value()` /
-  `gpio_output_*()` 只用于外部无源蜂鸣器 PA6）。接收不需要我们发东西；只有模块是
-  "查询-应答"式时，才需要我们自己构造并发出请求报文 —— 这一样要等模块手册/协议。
+- 头/尾归**发送方（传感器模块）**：app 只解析、不添加，也不往流里写任何标记。
+- app 里唯一自己产出的成品报文是 `json_status.cpp` 的 `kSampleFrame`（没配置来源时的
+  占位示例），它**不参与真实数据**。
+- 因为现在只认 `{...}`，**不需要再和模块核对任何标记字节** —— 报文里只要有一个带
+  `data` 的 JSON 对象就能解析。
 
 文件来源的处理：
 
-- 文件内容不变 → 不重复喂，避免同一帧每 200 ms 重复发布；
-- 文件被**追加**（新内容以旧内容为前缀）→ 只把新增后缀喂给解析器，跨刷新的半个帧能接上；
-- 文件被**重写** → 重置解析器，从头收集；
-- 之前在帧模式、但重写后的内容没有 `start` → 按“不完整”处理，**保留上一帧完整报文**，不把半截内容当新帧；
-- 读文件失败 → 保留上一帧，只更新错误状态。
+- 文件内容不变 → 不重复喂，避免同一条报文每 200 ms 重复发布；
+- 文件被**追加**（新内容以旧内容为前缀）→ 只把新增后缀喂给切分器，跨刷新的半个对象能接上；
+- 文件被**重写** → 重置切分器，从头收集；
+- 读文件失败 → 保留上一条，只更新错误状态。
 
 界面：
 
-- 每个信息源有**独立**的 `JsonFrameParser` / `JsonStatus`；接口页「收到的报文」
-  只显示当前信息源的完整帧。收到帧时该路 `revision` 强制递增，卡片刷新
+- 每个信息源有**独立**的 `JsonObjectSplitter` / `JsonStatus`；接口页「收到的报文」
+  只显示当前信息源的对象原文。收到对象时该路 `revision` 强制递增，卡片刷新
   （长报文自动换行，卡片可上下滚动）。
 - 文件来源（开发机/无串口时）：信息源 1 用 `FIRECONTROL_JSON` / `FIRECONTROL_JSON_FILE` /
-  `./firecontrol.json` / 内置帧；信息源 2..12 用 `FIRECONTROL_JSON_FILE_<N>`（可选）。
+  `./firecontrol.json` / 内置报文；信息源 2..12 用 `FIRECONTROL_JSON_FILE_<N>`（可选）。
 - 真实来源是**串口**，见 §8.3：每路一个独立设备，后台线程读字节后调用
   `json_source_feed(index, data, len)`（线程安全）；断线重连时调 `json_source_reset(index)`。
 
@@ -574,7 +555,7 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
   1..12），启动时由 `serial_apply_env()` 配置；格式不对只报一行、不崩。
 - 退出：`cpp_start()` 在拆界面之前 `serial_stop()`（关端口 + join 线程）。
 - 测试：`tests/test_serial_source.cpp` 用伪终端 (`posix_openpt`) 冒充串口，
-  覆盖打开/关闭、完整帧走串口、半帧、断线检测、非法波特率、环境变量格式错误；
+  覆盖打开/关闭、完整报文走串口、半个报文、断线检测、非法波特率、环境变量格式错误；
   原生 `ctest` 4/4。**不依赖真硬件**，交叉编译时跳过。
 
 界面（`gui.cpp`）：
@@ -601,8 +582,8 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 | 项目 | 结果 |
 |---|---|
 | 原生构建 | 0 warning，`ctest` 4/4 |
-| JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖五个状态字段/别名/旧 data+smoke/缺字段/类型错误/语法错误/尾部垃圾/没有已知字段 + 逐路 feed/reset；`test_json_frame` 覆盖分块到达、半包、不完整帧丢弃、新 start 重开、多帧；控制台已验证逐路文件；**板上真串口待接** |
-| 串口来源 | `test_serial_source`（伪终端）覆盖打开/关闭、完整帧经串口解析、半帧拼接、断线检测、非法波特率、环境变量格式错误；**板上真串口待接** |
+| JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖探测版信封报文（data 子对象）/扁平格式/别名/旧 data+smoke/缺字段/类型错误/语法错误/没有已知字段 + 逐路 feed/reset；`test_json_stream` 覆盖分块到达、多条对象、头尾垃圾、字符串/嵌套/转义、超长对象丢弃后恢复；控制台已验证逐路文件；**板上真串口待接** |
+| 串口来源 | `test_serial_source`（伪终端）覆盖打开/关闭、探测版报文经串口解析、半个报文拼接、断线检测、非法波特率、环境变量格式错误；**板上真串口待接** |
 | 原生 GUI | `deffire-gui-dev` 约 900 KB，1024×600 窗口正常；首页 12 个信息源、设置页、信息源页、LED / 蜂鸣器 / 外部蜂鸣器页的切页与按钮派发已实测（含文件 JSON 热更新） |
 | 容器镜像构建 | ✅ 通过（`bookworm-slim` + gcc-arm 12 + cmake 3.25.1） |
 | 镜像自检 | ✅ 能交叉编译 X11+FreeType 的 armhf 程序；pkg-config 指向 armhf |
@@ -648,6 +629,6 @@ cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不
 - [x] ~~**接 12 路独立串口**~~ —— app 侧已实现（`serial_source.cpp`：每路设备+波特率、
       poll 线程、断线每秒重连 + reset）；板上真串口接线/路径仍需现场确认
 - [ ] **板上验证逐路帧**：用 `FIRECONTROL_JSON_FILE_<N>` 分别喂 1..12，确认各页只显示
-      自己的完整帧（需要板上有 X 才能看界面）；串口侧用伪终端或真设备验证半包/坏帧/重连
+      自己的完整报文（需要板上有 X 才能看界面）；串口侧用伪终端或真设备验证半包/坏帧/重连
 - [ ] **串口超时/无帧状态**：断线已有状态和重连；"打开了但长时间没有帧"、
       CRC/格式错误怎么显示到模块状态，还没定
