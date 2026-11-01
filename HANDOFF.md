@@ -11,8 +11,8 @@
 | 项 | 值 |
 |---|---|
 | 分支 | 只剩 `main`（本地/远端） |
-| 最新提交 | `96d4e18` `feat: 每路独立串口来源 + 模块字段解析`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
-| `main` = `origin/main` | `96d4e18`（已推送） |
+| 最新提交 | `86dcdd5` `feat: payload 改用模块固件字段 (fire_state/smoke_state/buzzer_state/led_state)`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
+| `main` = `origin/main` | `86dcdd5`（已推送） |
 | 工作区 | 干净；`build/`、`build-armhf/` 都在（本轮 native + armhf 都重建过） |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
 | 最近测试 | 本轮 `ctest` 4/4 通过；armhf 交叉编译通过（`build-armhf/deffire-gui-dev`，约 486 KB） |
@@ -20,6 +20,8 @@
 最近提交：
 
 ```text
+86dcdd5  feat: payload 改用模块固件字段 (fire_state/smoke_state/buzzer_state/led_state)
+2efe073  fix(gui): 已配置但没枚举到的串口设备不再从下拉里丢失
 96d4e18  feat: 每路独立串口来源 + 模块字段解析
 ee59410  docs(HANDOFF): 说明表格里的 hash 以 git log 为准
 06250e6  docs(HANDOFF): 同步本轮提交 hash 与推送状态
