@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # verify-on-board.sh — 在目标板上验证 armhf 产物是否与本板匹配
 #
-# 为什么需要它: 同一个 deffire-gui-dev 可能来自三套工具链
+# 为什么需要它: 同一个产物名 (FireFv0.<n>) 可能来自三套工具链
 #     a) Docker (Debian bookworm + gcc)     ← 现在统一到这套
 #     b) Zig 0.16 (开发机, 手工 sysroot)    ← 旧路径
 #     c) 板上原生编译 (g++)                 ← 最保险
@@ -10,18 +10,27 @@
 #
 # 用法 (在开发机上跑, 通过 ssh 到板子检查):
 #   ./armhf-toolchain/verify-on-board.sh fbi@192.168.1.100
-#   ./armhf-toolchain/verify-on-board.sh fbi@板子IP build-armhf/deffire-gui-dev
+#   ./armhf-toolchain/verify-on-board.sh fbi@板子IP build-armhf/FireFv0.<n>
 #
 # 也可以把本脚本拷到板上直接跑 (板上统一用 ~/Desktop):
 #   scp verify-on-board.sh 板子:~/Desktop/
-#   ssh 板子 'cd ~/Desktop && bash verify-on-board.sh ./deffire-gui-dev ./TOOLCHAIN.txt'
+#   ssh 板子 'cd ~/Desktop && bash verify-on-board.sh ./FireFv0.<n> ./TOOLCHAIN.txt'
 #   (第一个参数若是"存在的文件", 自动进入就地检查模式 —— 不必手写空串)
-#   等价写法: bash verify-on-board.sh "" ./deffire-gui-dev ./TOOLCHAIN.txt
+#   等价写法: bash verify-on-board.sh "" ./FireFv0.<n> ./TOOLCHAIN.txt
 
 set -uo pipefail
 
 HOST="${1:-}"
-LOCAL_EXE="${2:-build-armhf/deffire-gui-dev}"
+# 本地产物名带 commit 次数: 以 build-armhf/FIRE_VERSION.txt 为准, 没有就数 git。
+_local_default() {
+    if [ -f build-armhf/FIRE_VERSION.txt ]; then
+        local n
+        n="$(sed -n 's/^app=//p' build-armhf/FIRE_VERSION.txt)"
+        [ -n "$n" ] && { printf 'build-armhf/%s\n' "$n"; return; }
+    fi
+    printf 'build-armhf/FireFv0.%s\n' "$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+}
+LOCAL_EXE="${2:-$(_local_default)}"
 # 远端临时目录: 用 ~ 而不是 /root, 这样以 fbi 用户 ssh 时也能写 (板上的普通用户
 # 是 fbi, 不是 root)。~ 在双引号里不会被本地 shell 展开, 由远端 shell 展开。
 REMOTE_DIR="~/Desktop/fc-verify"
@@ -36,7 +45,8 @@ c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 # ---------------------------------------------------------------------------
 read -r -d '' REMOTE_CHECK <<'REMOTE' || true
 #!/bin/bash
-EXE="${1:-./deffire-gui-dev}"
+# 产物名带版本 (FireFv0.<commit 次数>); 正常调用会显式传进来。
+EXE="${1:-./FireFv0.0}"
 FP="${2:-}"
 fail=0
 
@@ -159,10 +169,10 @@ REMOTE
 # 在板上就地跑 → 直接执行检查, 不走 ssh
 #
 #   两种写法都支持:
-#     verify-on-board.sh ./deffire-gui-dev ./TOOLCHAIN.txt
-#     verify-on-board.sh "" ./deffire-gui-dev ./TOOLCHAIN.txt
+#     verify-on-board.sh ./FireFv0.<n> ./TOOLCHAIN.txt
+#     verify-on-board.sh "" ./FireFv0.<n> ./TOOLCHAIN.txt
 #   前一种的 $1 是个**存在的文件**, 说明它不是要 ssh 的目标主机 ——
-#   否则会去 ssh 一个叫 "./deffire-gui-dev" 的主机名而失败。
+#   否则会去 ssh 一个叫 "./FireFv0.<n>" 的主机名而失败。
 # ---------------------------------------------------------------------------
 FP_ARG="${3:-}"
 if [ -n "$HOST" ] && [ -e "$HOST" ]; then

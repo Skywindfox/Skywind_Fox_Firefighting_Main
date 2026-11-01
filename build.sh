@@ -22,6 +22,36 @@ ARMHF_DIR="build-armhf"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 
+# 产物名带版本 (FireFv0.<commit 次数>)。优先读构建目录里的 FIRE_VERSION.txt
+# (CMake 写的), 没有就用 git 数一次 —— 两边算法一致, 都是 commit 次数。
+fire_name() {
+    local dir="$1"
+    if [ -f "$dir/FIRE_VERSION.txt" ]; then
+        local name
+        name="$(sed -n 's/^app=//p' "$dir/FIRE_VERSION.txt")"
+        if [ -n "$name" ]; then
+            printf '%s\n' "$name"
+            return
+        fi
+    fi
+    local count
+    count="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)"
+    printf 'FireFv0.%s\n' "$count"
+}
+
+fire_console_name() {
+    local dir="$1"
+    if [ -f "$dir/FIRE_VERSION.txt" ]; then
+        local name
+        name="$(sed -n 's/^console=//p' "$dir/FIRE_VERSION.txt")"
+        if [ -n "$name" ]; then
+            printf '%s\n' "$name"
+            return
+        fi
+    fi
+    printf '%s-console\n' "$(fire_name "$dir")"
+}
+
 c_ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
 c_info() { printf '\033[36m%s\033[0m\n' "$*"; }
 c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
@@ -46,8 +76,9 @@ do_native() {
     ctest --test-dir "$NATIVE_DIR" --output-on-failure
 
     c_ok "✓ 完成:"
-    echo "    控制台程序 : $NATIVE_DIR/deffire-dev       (打印 hallo world)"
-    echo "    图形界面   : $NATIVE_DIR/deffire-gui-dev   (开窗口, 需 DISPLAY)"
+    echo "    控制台程序 : ./$NATIVE_DIR/$(fire_console_name "$NATIVE_DIR")   (打印 hallo world)"
+    echo "    图形界面   : ./$NATIVE_DIR/$(fire_name "$NATIVE_DIR")   (开窗口, 需 DISPLAY)"
+    echo "    版本文件   : $NATIVE_DIR/FIRE_VERSION.txt"
 }
 
 do_gui_full() {
@@ -64,7 +95,7 @@ do_gui_full() {
     fi
 
     c_info "-------- 启动全屏窗口 --------"
-    exec ./"$NATIVE_DIR"/deffire-gui-dev
+    exec ./"$NATIVE_DIR"/"$(fire_name "$NATIVE_DIR")"
 }
 
 do_gui_armhf() {
@@ -89,7 +120,7 @@ do_gui_armhf() {
     c_info "======== 交叉编译 GUI (armhf), 走 Docker ========"
     "$script" "$@"
 
-    local exe="$ARMHF_DIR/deffire-gui-dev"
+    local exe="$ARMHF_DIR/$(fire_name "$ARMHF_DIR")"
     [ -f "$exe" ] || { c_err "✗ 没有产出 $exe"; exit 1; }
 
     if [ -f "$ARMHF_DIR/TOOLCHAIN.txt" ]; then

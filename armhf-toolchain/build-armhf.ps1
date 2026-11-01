@@ -35,8 +35,19 @@ $Here       = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $Here
 $BuildDir   = Join-Path $ProjectRoot "build-armhf"
 
+# 版本号 = commit 次数 (产物名 FireFv0.<n> / FireFv0.<n>-console)。
+# .dockerignore 把 .git 排除了, 容器里数不出来, 所以这里数好再 --build-arg 传进去;
+# 没有 git 时退回 0 (产物名仍可用, 只是不能唯一对应提交)。
+$RevCount = 0
+try {
+    $countText = (& git -C $ProjectRoot rev-list --count HEAD 2>$null)
+    if ($countText -match '^\d+$') { $RevCount = [int]$countText }
+} catch { }
+$GuiName    = "FireFv0.$RevCount"
+$ConsoleName = "$GuiName-console"
+
 # 两个目标由同一次 cmake 产出, 少任何一个都说明构建不完整 —— 清单只写这一处。
-$Artifacts  = @("deffire-gui-dev", "deffire-dev")
+$Artifacts  = @($GuiName, $ConsoleName)
 
 # --- 检查 docker ---
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -105,6 +116,7 @@ Info "    方式: COPY 源码进镜像层 (不依赖 bind mount)"
 
 & docker build `
     --build-arg "BASE_IMAGE=$Image" `
+    --build-arg "FIRE_VERSION_COUNT=$RevCount" `
     -f "$Here/Dockerfile.build-armhf" `
     -t $BuildImage `
     $ProjectRoot
@@ -117,6 +129,12 @@ Info "=== 取回产物 ==="
 # 先清掉上一次的产物。不清的话, "新产物缺失"会被同名旧文件顶替, 下面的逐个检查
 # 就形同虚设 —— 产物改名那次就出现过 halloworld-* 与 deffire-* 并存的情况。
 # 删不掉(被编辑器/杀毒占用)直接失败: 留着旧文件比构建失败更危险。
+# 改名前的旧产物 (deffire-*) 顺手清掉, 防止被误拷。
+foreach ($legacy in @("deffire-gui-dev", "deffire-dev")) {
+    $old = Join-Path $BuildDir $legacy
+    if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue; Write-Host "  已清掉旧名字产物 $legacy" }
+}
+
 foreach ($exe in $Artifacts) {
     $old = Join-Path $BuildDir $exe
     if (Test-Path $old) {
@@ -136,6 +154,11 @@ foreach ($exe in $Artifacts) {
     if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ $exe" }
     else { Write-Host "  ✗ $exe  (docker cp 失败, 退出码 $LASTEXITCODE)" }
 }
+# 版本清单 (build.sh / deploy 靠它拿实际产物名), 取不到不算失败。
+& docker cp "${cid}:/work/build-armhf/FIRE_VERSION.txt" (Join-Path $BuildDir "FIRE_VERSION.txt") 2>$null | Out-Null
+if ($LASTEXITCODE -eq 0) { Write-Host "  ✓ FIRE_VERSION.txt" }
+else { Write-Host "  ! FIRE_VERSION.txt 没取到 (脚本会退回数 git)" }
+
 & docker rm $cid | Out-Null
 & docker rmi $BuildImage 2>$null | Out-Null
 
@@ -184,8 +207,8 @@ Ok "✓ 完成: $BuildDir"
 Write-Host @"
 
   部署到板子 (板上统一用 ~/Desktop):
-      scp build-armhf/deffire-gui-dev build-armhf/TOOLCHAIN.txt fbi@<板子IP>:~/Desktop/
-      ssh -t fbi@<板子IP> 'cd ~/Desktop && DISPLAY=:0 ./deffire-gui-dev'
+      scp build-armhf/$GuiName build-armhf/TOOLCHAIN.txt fbi@<板子IP>:~/Desktop/
+      ssh -t fbi@<板子IP> 'cd ~/Desktop && DISPLAY=:0 ./$GuiName'
 
   板上自检(确认产物与板子匹配):
       在 Linux / WSL / Git Bash 里跑:

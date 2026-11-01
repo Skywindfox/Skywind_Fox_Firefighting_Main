@@ -14,8 +14,8 @@
 # 必须显式给地址 (和 verify-on-board.sh 一致): 开发机上通常解析不了板子的
 # 短主机名, 写死一个默认值只会让人误以为网络坏了。
 #
-# 传什么:
-#     deffire-gui-dev / deffire-dev / TOOLCHAIN.txt  →  ~/Desktop/
+# 传什么 (名字带 commit 次数, 见 CMake 里的版本号一节):
+#     FireFv0.<n> / FireFv0.<n>-console / FIRE_VERSION.txt / TOOLCHAIN.txt  →  ~/Desktop/
 #     setup-board-permissions.sh                    →  ~/  (首次部署要跑一次)
 #
 # 注意: 脚本以目标用户 (fbi) 身份 ssh, 不用 root。root 只在**板上**执行
@@ -64,15 +64,30 @@ c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
 # ---------------------------------------------------------------------------
 # 1) 本地产物
+#
+# 产物名 = FireFv0.<commit 次数>; 以 build-armhf/FIRE_VERSION.txt 为准
+# (交叉编译脚本会一起取回), 没有就退回用 git 数一次。
 # ---------------------------------------------------------------------------
-if [ ! -f "$BUILD_DIR/deffire-gui-dev" ]; then
-    c_err "✗ 找不到 $BUILD_DIR/deffire-gui-dev"
+APP_NAME=""
+CONSOLE_NAME=""
+if [ -f "$BUILD_DIR/FIRE_VERSION.txt" ]; then
+    APP_NAME="$(sed -n 's/^app=//p' "$BUILD_DIR/FIRE_VERSION.txt")"
+    CONSOLE_NAME="$(sed -n 's/^console=//p' "$BUILD_DIR/FIRE_VERSION.txt")"
+fi
+if [ -z "$APP_NAME" ]; then
+    REV_COUNT="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)"
+    APP_NAME="FireFv0.$REV_COUNT"
+    CONSOLE_NAME="$APP_NAME-console"
+fi
+
+if [ ! -f "$BUILD_DIR/$APP_NAME" ]; then
+    c_err "✗ 找不到 $BUILD_DIR/$APP_NAME"
     c_err "  先交叉编译:  ./build.sh gui-armhf"
     exit 1
 fi
 
 c_info "=== 待传输 ==="
-for f in deffire-gui-dev deffire-dev TOOLCHAIN.txt; do
+for f in "$APP_NAME" "$CONSOLE_NAME" FIRE_VERSION.txt TOOLCHAIN.txt; do
     if [ -f "$BUILD_DIR/$f" ]; then
         printf '    %-18s %s 字节\n' "$f" "$(stat -c%s "$BUILD_DIR/$f")"
     fi
@@ -105,7 +120,7 @@ c_ok "    ✓ SSH 可达"
 REMOTE_DIR="Desktop"
 c_info "=== 传输到板子的 ~/$REMOTE_DIR ==="
 FILES=()
-for f in deffire-gui-dev deffire-dev TOOLCHAIN.txt; do
+for f in "$APP_NAME" "$CONSOLE_NAME" FIRE_VERSION.txt TOOLCHAIN.txt; do
     [ -f "$BUILD_DIR/$f" ] && FILES+=("$BUILD_DIR/$f")
 done
 FILES+=("$HERE/setup-board-permissions.sh")
@@ -176,10 +191,10 @@ if [ "$DO_RUN" -eq 1 ]; then
     c_info "=== 启动 GUI (DISPLAY=:0) ==="
     # 用 exec 让远程进程占住这个 ssh 会话; Ctrl+C 结束。
     # 板上有 LXDE/Openbox, 所以窗口会被 WM 接管 —— 全屏问题见 WARNING.md C-7。
-    ssh -t "${SSH_OPTS[@]}" "$TARGET" "cd ~/$REMOTE_DIR && DISPLAY=:0 ./deffire-gui-dev"
+    ssh -t "${SSH_OPTS[@]}" "$TARGET" "cd ~/$REMOTE_DIR && DISPLAY=:0 ./$APP_NAME"
 else
     echo
     c_info "启动:"
-    echo "    ssh -t $TARGET 'cd ~/$REMOTE_DIR && DISPLAY=:0 ./deffire-gui-dev'"
+    echo "    ssh -t $TARGET 'cd ~/$REMOTE_DIR && DISPLAY=:0 ./$APP_NAME'"
     echo "    或者加 --run 让本脚本启动。"
 fi

@@ -81,6 +81,10 @@ int cpp_start()
 int device_init()
 {
     std::printf("%s\n", firecontrol::greeting().c_str());
+#ifdef FIRE_VERSION_STRING
+    // 产物名本身带版本 (FireFv0.<commit 次数>), 这里再打一行, 板上不看文件名也能确认。
+    std::printf("版本: FireFv%s\n", FIRE_VERSION_STRING);
+#endif
 
     // JSON 状态: 解析传感器模块的 {"temperature":..,"fire_alarm":..,...};
     // 旧的 {"data":1,"smoke":1} 仍然认。

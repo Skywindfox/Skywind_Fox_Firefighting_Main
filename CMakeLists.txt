@@ -35,6 +35,41 @@ elseif(CMAKE_CXX_COMPILER_TARGET MATCHES "arm|aarch64|mips|riscv")
 endif()
 
 # ---------------------------------------------------------------------------
+# 版本号 = 本仓库的 commit 次数；产物名 FireFv0.<次数>
+#
+# 目的: 每次提交编出来的文件名不同, 板上/桌面来回拷不会互相覆盖, 也不会把上一版
+# 当成这一版。GUI 产物 FireFv0.<n>, 控制台版 FireFv0.<n>-console。
+#
+# 交叉编译走容器时 .git 不进镜像 (.dockerignore 排除了), 所以 build-armhf.sh /
+# build-armhf.ps1 会用 -DFIRE_VERSION_COUNT=... 把次数传进来; 原生构建直接数 git。
+# 实际名字同时写进 <build>/FIRE_VERSION.txt, 部署脚本从那里读。
+# ---------------------------------------------------------------------------
+set(FIRE_VERSION_COUNT "" CACHE STRING "commit 次数; 留空则用 git rev-list --count HEAD")
+if(FIRE_VERSION_COUNT STREQUAL "")
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE _fire_git_count
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+    if(NOT _fire_git_count MATCHES "^[0-9]+$")
+        set(_fire_git_count 0)
+    endif()
+    set(FIRE_VERSION_COUNT "${_fire_git_count}")
+endif()
+
+set(FIRE_VERSION "0.${FIRE_VERSION_COUNT}")
+set(FIRE_APP_NAME "FireFv${FIRE_VERSION}")
+set(FIRE_CONSOLE_NAME "${FIRE_APP_NAME}-console")
+
+message(STATUS "版本: ${FIRE_APP_NAME} (第 ${FIRE_VERSION_COUNT} 个提交)")
+file(WRITE "${CMAKE_BINARY_DIR}/FIRE_VERSION.txt"
+     "version=${FIRE_VERSION}\ncommit_count=${FIRE_VERSION_COUNT}\napp=${FIRE_APP_NAME}\nconsole=${FIRE_CONSOLE_NAME}\n")
+
+# ---------------------------------------------------------------------------
 # cJSON (third_party) —— 最基础的 JSON 解析
 #
 # 源码随仓库提交 (third_party/cjson, 1.7.18, MIT), 不依赖系统 libcjson:
@@ -94,6 +129,9 @@ target_link_libraries(firecontrol PRIVATE cjson)
 find_package(Threads REQUIRED)
 target_link_libraries(firecontrol PUBLIC Threads::Threads)
 
+# 版本字符串编进产物, 启动时打印 (板上不看文件名也能确认版本)。
+target_compile_definitions(firecontrol PUBLIC "FIRE_VERSION_STRING=\"${FIRE_VERSION}\"")
+
 # ---------------------------------------------------------------------------
 # 可执行文件
 # ---------------------------------------------------------------------------
@@ -102,6 +140,9 @@ add_executable(deffire-dev
     src/appgui/gui_stub.cpp   # 同一套骨架的"无界面"实现: gui_build / render / gui_teardown
 )
 target_link_libraries(deffire-dev PRIVATE firecontrol)
+# 产物名带 commit 次数 (FireFv0.<n>-console), 目标名保持稳定 —— 构建/脚本仍按
+# --target deffire-dev 引用。
+set_target_properties(deffire-dev PROPERTIES OUTPUT_NAME "${FIRE_CONSOLE_NAME}")
 
 # ---------------------------------------------------------------------------
 # armhf 产物的瘦身
@@ -145,8 +186,9 @@ endif()
 #       X11/freetype, 且 build.sh 里的 Zig 路径已删除, 现在没有任何脚本引用它。
 #       留着只为查阅历史, 不要用它开 WITH_GUI=ON (会在下面直接报错)。
 #
-# 命名说明: 两个目标名字都不能重复 —— 控制台是 deffire-dev, GUI 是 deffire-gui-dev。
-#         后缀 -dev 表示当前是开发阶段的构建, 正式版去掉即可。
+# 命名说明: CMake **目标名**固定是 deffire-dev / deffire-gui-dev (脚本按它引用);
+#         **产物名**带 commit 次数: FireFv0.<n> 和 FireFv0.<n>-console (见文件开头的
+#         版本号那一节)。
 # ---------------------------------------------------------------------------
 set(WITH_GUI "AUTO" CACHE STRING "是否构建 LVGL GUI (ON / OFF / AUTO)")
 set_property(CACHE WITH_GUI PROPERTY STRINGS ON OFF AUTO)
@@ -216,6 +258,7 @@ else()
             src/source/main.cpp    # 与控制台版同一个入口: main() 只调 cpp_start()
             src/appgui/gui.cpp     # 四个阶段里的 gui_build / render / gui_teardown
         )
+        set_target_properties(deffire-gui-dev PROPERTIES OUTPUT_NAME "${FIRE_APP_NAME}")
         target_include_directories(deffire-gui-dev PRIVATE ${GUI_DEPS_INCLUDE_DIRS})
         target_compile_options(deffire-gui-dev PRIVATE ${GUI_DEPS_CFLAGS_OTHER})
         target_link_directories(deffire-gui-dev PRIVATE ${GUI_DEPS_LIBRARY_DIRS})

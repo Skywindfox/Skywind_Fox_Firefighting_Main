@@ -15,7 +15,8 @@
 | 旧: Windows + Docker | Debian gcc | 镜像内 | X11 + freetype | Docker 镜像（仓库外） |
 | 板上原生编译 | 板上 g++ | 板载 | 板载 | 不需要 |
 
-三者编译器和 libc 都不同，产出的二进制**同名**（`deffire-gui-dev`），
+三者编译器和 libc 都不同。产物名带 commit 次数（`FireFv0.<n>`），
+同一个提交三次编译出来同名、不同提交不同名；
 出问题时第一步就得花时间确认"这是谁编的、它要的库本板有没有"。
 
 **现在统一到这里**：环境由本目录的 `Dockerfile` 定义，随仓库走，
@@ -146,8 +147,8 @@ include/lib 路径列表 —— 版本永远和 Debian 仓库一致，不会漂�
 | 镜像自检 1/2 | ✅ 能交叉编译 X11 + FreeType + libgpiod(v1) 的 armhf 程序（ELF32/ARM/hard-float） |
 | 镜像自检 2/2 | ✅ pkg-config 能查到 armhf 的 x11/freetype2/libgpiod（版本 1.6.3） |
 | 容器内 cmake 配置 | ✅ 编译器 `/usr/bin/arm-linux-gnueabihf-g++`，libs `X11;freetype`，GPIO `libgpiod 1.6.3 (v1)` |
-| 容器内完整编译 | ✅ LVGL 全量 + `deffire-gui-dev` / `deffire-dev` 链接成功，318 个编译单元 0 warning |
-| 产物 | `deffire-gui-dev` **407,936 字节**，ELF32 ARM hard-float，依赖 `libX11`/`libfreetype`/`libgpiod`/`libstdc++`/`libgcc_s`/`libc` |
+| 容器内完整编译 | ✅ LVGL 全量 + `FireFv0.<n>` / `FireFv0.<n>-console` 链接成功，318 个编译单元 0 warning |
+| 产物 | `FireFv0.<n>` **407,936 字节**，ELF32 ARM hard-float，依赖 `libX11`/`libfreetype`/`libgpiod`/`libstdc++`/`libgcc_s`/`libc` |
 | `verify-on-board.sh` 检查逻辑 | ✅ 32 位 / ARM / 硬浮点 / 6 个依赖 全部通过 |
 
 网络访问不了 `docker.io` 时，用镜像站即可（已验证可用）：

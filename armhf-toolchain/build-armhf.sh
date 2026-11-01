@@ -204,6 +204,20 @@ mkdir -p "$BUILD_DIR"
 #
 # 产物用 `cp` 从构建出来的镜像里取回宿主, 也不依赖挂载。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 版本号 = commit 次数 (产物名 FireFv0.<n> / FireFv0.<n>-console)
+#
+# .dockerignore 把 .git 排除了, 容器里数不出 commit 次数, 所以在这里数好,
+# 通过 --build-arg 传进去 (Dockerfile 再转成 -DFIRE_VERSION_COUNT)。
+# ---------------------------------------------------------------------------
+REV_COUNT="$(git -C "$PROJECT_ROOT" rev-list --count HEAD 2>/dev/null || echo 0)"
+case "$REV_COUNT" in
+    ''|*[!0-9]*) c_err "✗ 数不出 commit 次数: '$REV_COUNT'"; exit 1 ;;
+esac
+GUI_NAME="FireFv0.$REV_COUNT"
+CONSOLE_NAME="$GUI_NAME-console"
+c_info "    版本: $GUI_NAME (第 $REV_COUNT 个提交)"
+
 c_info "=== 容器内交叉编译 ($RUNTIME) ==="
 c_info "    方式: COPY 源码进镜像层 (不依赖 bind mount)"
 
@@ -213,6 +227,7 @@ trap 'rm -f "$BUILD_LOG"' EXIT
 
 if ! "$RUNTIME" build \
         --build-arg "BASE_IMAGE=$IMAGE" \
+        --build-arg "FIRE_VERSION_COUNT=$REV_COUNT" \
         -f "$DOCKERFILE_DIR/Dockerfile.build-armhf" \
         -t "$BUILD_IMAGE" \
         "$PROJECT_ROOT" 2>&1 | tee "$BUILD_LOG" | grep -E '^\s*\[|Class:|Machine:|Flags:|error|Error|FAIL' ; then
@@ -236,7 +251,14 @@ fi
 c_info "=== 取回产物 ==="
 mkdir -p "$BUILD_DIR"
 
-ARTIFACTS=(deffire-gui-dev deffire-dev)
+ARTIFACTS=("$GUI_NAME" "$CONSOLE_NAME")
+
+# 改名前的旧产物 (deffire-*) 已不再使用, 顺手清掉, 防止被误拷到板上。
+for legacy in deffire-gui-dev deffire-dev; do
+    if [ -e "$BUILD_DIR/$legacy" ]; then
+        rm -f "$BUILD_DIR/$legacy" && printf '  已清掉旧名字产物 %s\n' "$legacy"
+    fi
+done
 for f in "${ARTIFACTS[@]}"; do
     if [ -e "$BUILD_DIR/$f" ]; then
         rm -f "$BUILD_DIR/$f"
@@ -259,6 +281,12 @@ for f in "${ARTIFACTS[@]}"; do
         printf '  ✗ %s —— 容器里没有这个产物\n' "$f"
     fi
 done
+# 版本清单: build.sh / deploy 脚本靠它拿到实际产物名 (缺失不影响二进制本身)。
+if "$RUNTIME" cp "$CID:/work/build-armhf/FIRE_VERSION.txt" "$BUILD_DIR/FIRE_VERSION.txt" 2>/dev/null; then
+    printf '  ✓ FIRE_VERSION.txt\n'
+else
+    printf '  ! FIRE_VERSION.txt 没取到 (脚本会退回用 git 数 commit 次数)\n'
+fi
 "$RUNTIME" rm "$CID" >/dev/null 2>&1 || true
 "$RUNTIME" rmi "$BUILD_IMAGE" >/dev/null 2>&1 || true
 
@@ -332,7 +360,7 @@ for c in readelf "$HOME/.local/bin/arm-linux-gnueabihf-readelf" \
 done
 
 if [ -n "$READELF" ]; then
-    for exe in deffire-gui-dev deffire-dev; do
+    for exe in "$GUI_NAME" "$CONSOLE_NAME"; do
         [ -f "$BUILD_DIR/$exe" ] || continue
         echo
         echo "  $exe 的动态依赖:"
@@ -349,8 +377,8 @@ c_ok "✓ 完成: $BUILD_DIR"
 cat <<'NOTE'
 
   部署到板子 (板上统一用 ~/Desktop):
-      scp build-armhf/deffire-gui-dev build-armhf/TOOLCHAIN.txt fbi@<板子IP>:~/Desktop/
-      ssh -t fbi@<板子IP> 'cd ~/Desktop && DISPLAY=:0 ./deffire-gui-dev'
+      scp build-armhf/<FireFv0.N> build-armhf/TOOLCHAIN.txt fbi@<板子IP>:~/Desktop/
+      ssh -t fbi@<板子IP> 'cd ~/Desktop && DISPLAY=:0 ./<FireFv0.N>'
 
       或者一步到位 (会先建目录, 传完还会检查 LED/蜂鸣器的写权限):
       ./armhf-toolchain/deploy-to-board.sh fbi@<板子IP>

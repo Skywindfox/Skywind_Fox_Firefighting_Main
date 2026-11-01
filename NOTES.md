@@ -30,8 +30,8 @@ FireControlApp/
 │   ├── source/         程序入口
 │   │   └── main.cpp      收参数 → cpp_start()
 │   └── appgui/         界面实现
-│       ├── gui.cpp       LVGL 界面 → deffire-gui-dev
-│       └── gui_stub.cpp  无界面版 → deffire-dev
+│       ├── gui.cpp       LVGL 界面 → FireFv0.<n>
+│       └── gui_stub.cpp  无界面版 → FireFv0.<n>-console
 ├── tests/              单元测试 (ctest)
 ├── third_party/cjson/  cJSON v1.7.18 源码 (MIT)
 ├── third_party/lvgl/   LVGL v9.2.3 源码 (已裁剪)
@@ -44,10 +44,22 @@ FireControlApp/
 | 目录 | 目标 |
 |---|---|
 | `include/` + `src/library/` | `libfirecontrol.a` |
-| `src/source/main.cpp` + `src/appgui/gui.cpp` | `deffire-gui-dev` |
-| `src/source/main.cpp` + `src/appgui/gui_stub.cpp` | `deffire-dev` |
+| `src/source/main.cpp` + `src/appgui/gui.cpp` | `FireFv0.<n>` |
+| `src/source/main.cpp` + `src/appgui/gui_stub.cpp` | `FireFv0.<n>-console` |
 
 新加文件时**先想清楚它属于库还是程序**，再放进 `src/` 下对应目录并在 CMake 里登记。
+
+> **产物名里的 `<n>` = 本仓库的 commit 次数**（`git rev-list --count HEAD`），
+> 例如第 90 个提交编出来就是 `FireFv0.90` / `FireFv0.90-console`。
+> 这样每次提交的产物名都不同，板上/桌面来回拷不会互相覆盖。
+> 实际名字同时写在 `build/FIRE_VERSION.txt` / `build-armhf/FIRE_VERSION.txt`：
+>
+> ```bash
+> GUI="./build/$(sed -n 's/^app=//p' build/FIRE_VERSION.txt)"; echo "$GUI"
+> ```
+>
+> CMake **目标名**不变（`deffire-dev` / `deffire-gui-dev`），脚本仍按目标名构建；
+> 交叉编译时 `.git` 不进容器，提交次数由构建脚本用 `-DFIRE_VERSION_COUNT=` 传进去。
 
 ---
 
@@ -157,7 +169,7 @@ sudo apt install gpiod                                    # 排查 GPIO 时才�
 `libX11.so.6` / `libfreetype.so.6`（X 桌面自带），中文字体 `fonts-wqy-zenhei`，
 以及 **`libgpiod2`**（`sudo apt install libgpiod2`）。
 
-> ⚠ `libgpiod2` 是**硬依赖**：交叉编译出来的 `deffire-gui-dev` 链着
+> ⚠ `libgpiod2` 是**硬依赖**：交叉编译出来的 `FireFv0.<n>` 链着
 > `libgpiod.so.2`（`gpio_read_value()` 用它）。板上没有这个库时**整个界面起不来**
 > ——动态链接器在 `main()` 之前就会报 `error while loading shared libraries`，
 > 不是"传感器功能不可用"那么局部。`verify-on-board.sh` 会把缺失的库逐个列出来。
@@ -348,7 +360,7 @@ sudo reboot
 
 | 选项 | 默认 | 作用 | 不满足时 |
 |---|---|---|---|
-| `WITH_GUI` | `AUTO` | 编 LVGL 界面（`deffire-gui-dev`） | 原生：警告并跳过；交叉：`ON` 时直接报错 |
+| `WITH_GUI` | `AUTO` | 编 LVGL 界面（`FireFv0.<n>`） | 原生：警告并跳过；交叉：`ON` 时直接报错 |
 | `WITH_GPIOD` | `AUTO` | 编 `gpio_read_value()`（GPIO 开关量输入，传感器用） | 明确打印一句"不编入产物"并继续；`ON` 时直接报错 |
 
 ```bash
@@ -472,15 +484,15 @@ IntelliSense 走 `compile_commands.json`（CMake 导出），所以补全/跳转
 ```bash
 # 字面量: 直接用探测版的报文格式
 FIRECONTROL_JSON='{"header":"SENSOR_DATA","data":{"temperature":36.5,"fire_alarm":1,"smoke_alarm":0,"led_state":3,"buzzer_state":2},"footer":"END"}' \
-  ./build/deffire-gui-dev
+  ./build/FireFv0.<n>
 
 # 文件（运行时追加/重写，界面 200 ms 内跟着变）
 echo '{"header":"SENSOR_DATA","data":{"temperature":20.06,"fire_alarm":0},"footer":"END"}' > firecontrol.json
-./build/deffire-gui-dev
+./build/FireFv0.<n>
 
 # 串口: 板上直接填设备路径; 开发机上用 socat 造一对伪终端 (见 §8.3)
 socat -d -d pty,raw,echo=0 pty,raw,echo=0        # 输出两条 /dev/pts/N, M
-FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/deffire-gui-dev
+FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/FireFv0.<n>
 # 另一个终端往 /dev/pts/M 写报文:
 printf '%s\r\n' '{"header":"SENSOR_DATA","data":{"temperature":36.5,"fire_alarm":1,"smoke_alarm":0,"led_state":3,"buzzer_state":2},"footer":"END"}' > /dev/pts/M
 ```
@@ -488,7 +500,7 @@ printf '%s\r\n' '{"header":"SENSOR_DATA","data":{"temperature":36.5,"fire_alarm"
 当前它**只是解析/显示**：还没有根据 `fire_alarm` / `smoke_alarm` / `temperature` 做报警
 判定或联动（蜂鸣器/LED 是模块侧状态机，app 只显示），板上真串口也待接。
 
-cJSON 是**静态编入**的：`build-armhf/deffire-gui-dev` 的 `NEEDED` 里不会出现
+cJSON 是**静态编入**的：`build-armhf/FireFv0.<n>` 的 `NEEDED` 里不会出现
 `libcjson.so`，板上不需要装 cJSON；按原来的“本机交叉编译 → 拷到板上”流程即可。
 
 ### 8.2 报文切分与鲁棒性
@@ -584,10 +596,10 @@ app 只从字节流里抠出 **`{ ... }` 完整 JSON 对象**，花括号平衡�
 | 原生构建 | 0 warning，`ctest` 4/4 |
 | JSON 解析 | cJSON 1.7.18（vendored）；`test_json_status` 覆盖探测版信封报文（data 子对象）/扁平格式/别名/旧 data+smoke/缺字段/类型错误/语法错误/没有已知字段 + 逐路 feed/reset；`test_json_stream` 覆盖分块到达、多条对象、头尾垃圾、字符串/嵌套/转义、超长对象丢弃后恢复；控制台已验证逐路文件；**板上真串口待接** |
 | 串口来源 | `test_serial_source`（伪终端）覆盖打开/关闭、探测版报文经串口解析、半个报文拼接、断线检测、非法波特率、环境变量格式错误；**板上真串口待接** |
-| 原生 GUI | `deffire-gui-dev` 约 900 KB，1024×600 窗口正常；首页 12 个信息源、设置页、信息源页、LED / 蜂鸣器 / 外部蜂鸣器页的切页与按钮派发已实测（含文件 JSON 热更新） |
+| 原生 GUI | `FireFv0.<n>` 约 900 KB，1024×600 窗口正常；首页 12 个信息源、设置页、信息源页、LED / 蜂鸣器 / 外部蜂鸣器页的切页与按钮派发已实测（含文件 JSON 热更新） |
 | 容器镜像构建 | ✅ 通过（`bookworm-slim` + gcc-arm 12 + cmake 3.25.1） |
 | 镜像自检 | ✅ 能交叉编译 X11+FreeType 的 armhf 程序；pkg-config 指向 armhf |
-| 容器内交叉编译 | ✅ LVGL 全量 + `deffire-gui-dev` 链接成功 |
+| 容器内交叉编译 | ✅ LVGL 全量 + `FireFv0.<n>` 链接成功 |
 | **armhf 产物** | **约 0.4 MB**（2026-11 本轮重建 486 KB；具体字节以构建产物为准），`ELF32 / ARM / hard-float`，依赖 `libX11` / `libfreetype` / **`libgpiod`** / `libstdc++` / `libgcc_s` / `libc`；同源同镜像重建 sha256 逐字节一致（可复现） |
 | 上板实测（LVGL 版） | ✅ **已上板验证通过**（2026-10-18，项目成员确认；逐项证据建议按 [VERIFY-RUNBOOK.md](VERIFY-RUNBOOK.md) §5 回填） |
 | 上板实测（老 Xlib+Xft 版） | ✅ 曾通过（窗口正常、中文正常），但该版本已被 LVGL 版取代 |

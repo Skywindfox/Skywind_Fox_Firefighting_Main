@@ -18,10 +18,10 @@
 | # | 问题 | 说明 |
 |---|---|---|
 | 1 | ~~**LVGL 版的 armhf 产物还没在板上实测过**~~ **已关闭（2026-10-18）** | 已上板验证通过（项目成员确认）；原记录保留用于追溯。后续回归仍按 [VERIFY-RUNBOOK.md](VERIFY-RUNBOOK.md) 执行 |
-| 2 | **开发机上跑 GUI 中文会显示成方框** | 字体候选表里 6 条路径都是 Debian 布局，Fedora 上一条都不存在。临时绕开：`./build/deffire-gui-dev --font=/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc`。**板上已验证中文正常**（`wqy-zenhei.ttc` 在候选表第一条） |
-| 3 | **界面中央那行大字仍是 `halloworld`** | 二进制已改名为 `deffire-gui-dev` / `deffire-dev`，但屏幕正中显示的文字是 `src/appgui/gui.cpp` 里的 `kText`，**有意保留未改**。要改只动那一个常量 |
+| 2 | **开发机上跑 GUI 中文会显示成方框** | 字体候选表里 6 条路径都是 Debian 布局，Fedora 上一条都不存在。临时绕开：`./build/FireFv0.<n> --font=/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc`。**板上已验证中文正常**（`wqy-zenhei.ttc` 在候选表第一条） |
+| 3 | **界面中央那行大字仍是 `halloworld`** | 二进制已改名为 `FireFv0.<n>` / `FireFv0.<n>-console`，但屏幕正中显示的文字是 `src/appgui/gui.cpp` 里的 `kText`，**有意保留未改**。要改只动那一个常量 |
 | 4 | **CMake 不自动扫描源文件** | 新增 `.cpp` 必须手动加到 `CMakeLists.txt`（`add_library` / `add_executable`），否则不会被编译 |
-| 5 | **`build.sh` 没有"运行"模式** | 删 Zig 路径时 `run` / `gui` 一并删了。跑控制台直接调二进制 `./build/deffire-dev`；开发机看窗口用 `./build/deffire-gui-dev --windowed` |
+| 5 | **`build.sh` 没有"运行"模式** | 删 Zig 路径时 `run` / `gui` 一并删了。跑控制台直接调二进制 `./build/FireFv0.<n>-console`；开发机看窗口用 `./build/FireFv0.<n> --windowed` |
 | 6 | **armhf 的 GUI 不能在开发机运行** | 架构不同 + 需要板子的 libX11。必须 scp 到板子 |
 | 7 | **容器内首次全量编译较慢** | LVGL 有 311 个 `.c`。容器方案是 COPY 进镜像层，**没有增量编译**，每次全量 |
 | 8 | **repo 目录的 SELinux 标签可能被改过** | 如果曾用 `:Z` 跑过容器，标签会变成 `container_file_t` 且 `restorecon` 会拒绝恢复。修法见 [D-3](#d-3-z-会永久改写宿主目录的-selinux-标签) |
@@ -196,7 +196,7 @@ BASE_IMAGE="$(grep -iE '^FROM' Dockerfile | head -1 | awk '{print $NF}')"
 **症状**：交叉编译明明成功（产物、指纹都正常打印），最后却报：
 
 ```
-✗ 没有产出 build-gui-armhf/deffire-gui-dev
+✗ 没有产出 build-gui-armhf/FireFv0.<n>
 ```
 
 **根因**：`build.sh` 里定义了 `GUI_ARMHF_DIR="build-gui-armhf"`，但
@@ -247,7 +247,7 @@ printf '\xef\xbb\xbf' > /tmp/bom && cat armhf-toolchain/build-armhf.ps1 >> /tmp/
 ### B-19. 取产物前不清旧文件 → "逐个检查"会被旧产物骗过
 
 **症状**：容器里 GUI 编译失败（只有控制台产出），脚本却仍报构建成功，
-`build-armhf/` 里的 `deffire-gui-dev` 其实是**上一次**的旧文件。
+`build-armhf/` 里的 `FireFv0.<n>` 其实是**上一次**的旧文件。
 
 **根因**：`podman cp` / `docker cp` 失败时**不会删除目标文件**，上一次的同名产物
 就留在原地。于是"逐个检查产物是否存在"看到的是旧文件，判定为成功。
@@ -309,7 +309,7 @@ Fedora 上这些路径**全部不存在**（它的 Noto CJK 装在
 | 坑 | 说明 |
 |---|---|
 | `LV_CONF_PATH` 必须在 `add_subdirectory` **之前**设置 | LVGL 自己的 CMake 会把它变成编译宏 `-DLV_CONF_PATH=...`。找不到这个文件时 LVGL 会退回全默认配置（16 位色、没开 X11/FreeType），编出来的界面是另一回事 |
-| LVGL 是第三方代码，别参与"零警告"要求 | 用 `target_compile_options(lvgl PRIVATE -w)`。只放过 `lvgl` 目标，`deffire-gui-dev` 仍保持零警告 |
+| LVGL 是第三方代码，别参与"零警告"要求 | 用 `target_compile_options(lvgl PRIVATE -w)`。只放过 `lvgl` 目标，`FireFv0.<n>` 仍保持零警告 |
 | LVGL 的 FreeType 后端要 `ft2build.h` | 见 [B-9](#b-9-freetype-的头文件不在默认搜索路径)，include 路径要挂到 `lvgl` 目标上 |
 
 ### C-5. 触摸在 X11 里就是普通 Button 事件

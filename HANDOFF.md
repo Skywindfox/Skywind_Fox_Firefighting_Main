@@ -15,7 +15,7 @@
 | `main` = `origin/main` | `c83fab2`（已推送） |
 | 工作区 | 干净；`build/`、`build-armhf/` 都在（本轮 native + armhf 都重建过） |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
-| 最近测试 | 本轮 `ctest` 4/4 通过；armhf 交叉编译通过（`build-armhf/deffire-gui-dev`，约 486 KB） |
+| 最近测试 | 本轮 `ctest` 4/4 通过；armhf 交叉编译通过（`build-armhf/FireFv0.<n>`，约 486 KB） |
 
 最近提交：
 
@@ -214,29 +214,33 @@ JsonStatus json_status();           // 信息源 0，普通页 JSON 行用
 
 构建目录：`build/`、`build-armhf/` 都已重建（本轮 native `ctest` 4/4 + armhf 交叉编译）。
 
+**产物名 = `FireFv0.<commit 次数>`**（控制台版加 `-console` 后缀）。实际名字看
+`build/FIRE_VERSION.txt`：`GUI="./build/$(sed -n 's/^app=//p' build/FIRE_VERSION.txt)"`。
+CMake 目标名仍是 `deffire-dev` / `deffire-gui-dev`。
+
 ```bash
 ./build.sh native        # build/ + ctest
-./build.sh gui-armhf     # 交叉编译 GUI，产物 build-armhf/deffire-gui-dev
+./build.sh gui-armhf     # 交叉编译 GUI，产物 build-armhf/FireFv0.<n>
 ```
 
 本地窗口：
 
 ```bash
 cd FireControlApp
-DISPLAY=:0 ./build/deffire-gui-dev --windowed
+DISPLAY=:0 ./build/FireFv0.<n> --windowed
 ```
 
 逐路文件测试：
 
 ```bash
-FIRECONTROL_JSON_FILE_2=/tmp/source2.json DISPLAY=:0 ./build/deffire-gui-dev --windowed
+FIRECONTROL_JSON_FILE_2=/tmp/source2.json DISPLAY=:0 ./build/FireFv0.<n> --windowed
 ```
 
 串口测试（开发机上用 socat 造伪终端，板上直接填设备路径）：
 
 ```bash
 socat -d -d pty,raw,echo=0 pty,raw,echo=0      # 得到两条 /dev/pts/N, M
-FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/deffire-gui-dev --windowed
+FIRECONTROL_SERIAL_1=/dev/pts/N:115200 ./build/FireFv0.<n> --windowed
 printf '%s' '<下面那条帧>' > /dev/pts/M
 ```
 

@@ -17,6 +17,10 @@
 ARG BASE_IMAGE=firecontrol-armhf:bookworm
 FROM ${BASE_IMAGE}
 
+# 版本号 = commit 次数 (产物名 FireFv0.<n>)。.git 被 .dockerignore 排除, 容器里
+# 数不出 commit 次数, 所以 build-armhf.sh 用 --build-arg 传进来。
+ARG FIRE_VERSION_COUNT=0
+
 # 源码复制进来。注意 .dockerignore 会排除 .git/build* 等, 保持镜像精简。
 COPY CMakeLists.txt lv_conf.h /work/
 COPY armhf-toolchain/ /work/armhf-toolchain/
@@ -33,11 +37,12 @@ RUN set -eux; \
           -DCMAKE_TOOLCHAIN_FILE=/work/armhf-toolchain/toolchain-docker-armhf.cmake \
           -DCMAKE_BUILD_TYPE=Release \
           -DBUILD_TESTING=OFF \
-          -DWITH_GUI=ON; \
+          -DWITH_GUI=ON \
+          -DFIRE_VERSION_COUNT=${FIRE_VERSION_COUNT}; \
     cmake --build /work/build-armhf -j "$(nproc)"; \
     echo "=== 产物 ==="; \
-    ls -la /work/build-armhf/deffire-gui-dev /work/build-armhf/deffire-dev 2>/dev/null || true; \
-    for f in /work/build-armhf/deffire-gui-dev /work/build-armhf/deffire-dev; do \
+    ls -la /work/build-armhf/FireFv* 2>/dev/null || true; \
+    for f in /work/build-armhf/FireFv*; do \
         [ -f "$$f" ] || continue; \
         arm-linux-gnueabihf-readelf -h "$$f" | grep -E 'Class:|Machine:|Flags:' | sed 's/^/    /'; \
     done

@@ -82,17 +82,17 @@ Stop-Transcript
 |---|---|---|
 | 1 | `=== 重建镜像 ... ===` 或 `=== 镜像 ... 不存在, 开始构建 ===`，或两行都没有 | 两行都没有 = 镜像已存在、直接复用，正常 |
 | 2 | `=== 容器内交叉编译 (docker) ===` | |
-| 3 | 逐条 `✓ deffire-gui-dev` / `✓ deffire-dev`（各一行） | 出现 `✗ ... (docker cp 失败, 退出码 N)` = **真失败**，不要继续往下走 |
+| 3 | 逐条 `✓ FireFv0.<n>` / `✓ FireFv0.<n>-console`（各一行） | 出现 `✗ ... (docker cp 失败, 退出码 N)` = **真失败**，不要继续往下走 |
 | 4 | `=== 写工具链指纹 ===` 里 `host_runtime = docker-desktop (windows)`，且 `built_local` 是**当前 UTC 时间** | `built_local` 是旧时间 = 跑的是旧产物 |
 | 5 | `=== 产物 ===` 两行都有字节数（无 `缺失`） | 只有控制台产物、GUI 缺失时，脚本会 `exit 1`（这就是 PR #6 修的那个静默问题） |
 | 6 | `✓ 完成: ...\build-armhf`，**且 `$LASTEXITCODE -eq 0`** | 退出码是唯一权威判据 |
-| 7 | `build-armhf\TOOLCHAIN.txt` 与 `deffire-gui-dev` / `deffire-dev` 三个文件都在 | |
+| 7 | `build-armhf\TOOLCHAIN.txt`、`FIRE_VERSION.txt` 与 `FireFv0.<n>` / `FireFv0.<n>-console` 都在 | `<n>` = commit 次数；实际名字见 `FIRE_VERSION.txt` |
 
 参考量级（Linux 侧同一套容器实测，2026-09-18）：
 
 ```
-deffire-gui-dev   约 408 KB   (407936 字节)
-deffire-dev       约 9.8 KB   (9768 字节)
+FireFv0.<n>   约 408 KB   (407936 字节)
+FireFv0.<n>-console       约 9.8 KB   (9768 字节)
 ```
 
 两个都比接入 libgpiod 之前大（约 404 KB / 5.6 KB）：`libgpiod` 是通过 `firecontrol`
@@ -113,18 +113,18 @@ deffire-dev       约 9.8 KB   (9768 字节)
 | `镜像构建失败` | 多为基础镜像拉不到 | 换镜像站重试 |
 | `容器内构建失败` | 容器里 cmake/g++ 报错 | 往上翻 grep 出的 `error` 行；必要时 `-Shell` 进去手工复现 |
 | `旧产物删不掉: ...` | 文件被杀毒 / 编辑器 / OneDrive 占用 | 关掉占用者；或删整个 `build-armhf\` 再跑（脚本故意在这里硬失败） |
-| `缺产物: deffire-gui-dev` | 容器里 GUI 没编出来 | 当失败处理，别拿旧产物上板 |
+| `缺产物: FireFv0.<n>` | 容器里 GUI 没编出来 | 当失败处理，别拿旧产物上板 |
 
 ### 1.5 必须留的证据（回填 §5 用）
 
 ```powershell
 # 1) 两个产物的哈希（与 Linux 侧 c73d670c… / 6ddb8427… 相同是加分项：
 #    说明两边可复现；不同**不算失败**，但必须过 §3 的板上预检才算数）
-Get-FileHash -Algorithm SHA256 build-armhf\deffire-gui-dev
-Get-FileHash -Algorithm SHA256 build-armhf\deffire-dev
+Get-FileHash -Algorithm SHA256 build-armhf\FireFv0.<n>
+Get-FileHash -Algorithm SHA256 build-armhf\FireFv0.<n>-console
 
 # 2) 产物大小
-Get-ChildItem build-armhf\deffire-gui-dev, build-armhf\deffire-dev | Select-Object Name, Length
+Get-ChildItem build-armhf\FireFv0.<n>, build-armhf\FireFv0.<n>-console | Select-Object Name, Length
 
 # 3) 工具链指纹（整份贴回去）
 Get-Content build-armhf\TOOLCHAIN.txt
@@ -140,10 +140,10 @@ Get-Content build-armhf\TOOLCHAIN.txt
 
 ```powershell
 $B = "fbi@<板子IP>"
-scp build-armhf\deffire-gui-dev build-armhf\TOOLCHAIN.txt armhf-toolchain\setup-board-permissions.sh "${B}:~/Desktop/"
+scp build-armhf\FireFv0.<n> build-armhf\TOOLCHAIN.txt armhf-toolchain\setup-board-permissions.sh "${B}:~/Desktop/"
 ```
 
-（`deffire-dev` 是控制台自检程序，不跑 GUI 时可不传。`~/Desktop/` 的 `~` 由**远端 shell** 展开，Windows 侧不用管。）
+（`FireFv0.<n>-console` 是控制台自检程序，不跑 GUI 时可不传。`~/Desktop/` 的 `~` 由**远端 shell** 展开，Windows 侧不用管。）
 
 `[Linux]` 等价一步到位（会自动建目录 + 传完直接探测 sysfs 写权限）：
 
@@ -213,7 +213,7 @@ gpiodetect                                 # 应能列出 gpiochipN，不再是 
 
 ```bash
 cd ~/Desktop
-bash verify-on-board.sh ./deffire-gui-dev ./TOOLCHAIN.txt   # 脚本需先 scp 上去
+bash verify-on-board.sh ./FireFv0.<n> ./TOOLCHAIN.txt   # 脚本需先 scp 上去
 ```
 
 **通过判据**：末尾打印 `==== 结论: 产物与本板匹配, 可以运行 ====`，且退出码 0。
@@ -234,7 +234,7 @@ bash verify-on-board.sh ./deffire-gui-dev ./TOOLCHAIN.txt   # 脚本需先 scp �
 
 ```bash
 cd ~/Desktop
-DISPLAY=:0 ./deffire-gui-dev 2>&1 | tee run-$(date +%Y%m%d-%H%M%S).log
+DISPLAY=:0 ./FireFv0.<n> 2>&1 | tee run-$(date +%Y%m%d-%H%M%S).log
 ```
 
 （回调里每处都 `fflush(stdout)`，所以管道给 `tee` 不会丢输出。）
@@ -419,7 +419,7 @@ DISPLAY=:0 wmctrl -lG
 |---|---|---|
 | 列表枚举 | 点【刷新串口】 | 控制台打印 `串口列表已刷新 (N 个设备)`；下拉里出现 `/dev/tty*` |
 | 打开串口 | 选设备+波特率→【应用设置】 | 控制台 `信息源 N 应用串口: ... @ ... (已打开)`；状态变绿 |
-| 无界面配置 | `FIRECONTROL_SERIAL_1="/dev/ttyS0:115200" ./deffire-gui-dev` | 同上，且不用点界面 |
+| 无界面配置 | `FIRECONTROL_SERIAL_1="/dev/ttyS0:115200" ./FireFv0.<n>` | 同上，且不用点界面 |
 | 伪终端代替硬件 | `socat -d -d pty,raw,echo=0 pty,raw,echo=0`，另开终端 `printf '%s\r\n' '<报文>' > /dev/pts/M` | 那一路上报报文 + 五行更新 |
 | 拔线/断线 | 打开后拔掉 USB 转串口 | 控制台 `串口断开: ...（每秒自动重连）`；状态变 `未打开：...（每秒重连）` |
 | 重新插回 | 插回同一设备 | 1 秒内 `串口已重连: ...`，之后继续收帧 |
@@ -440,8 +440,8 @@ DISPLAY=:0 wmctrl -lG
 - 日期 / 执行人：
 - [Win] PowerShell 版本：            ；脚本提交：
 - [Win] build-armhf.ps1 退出码：      ；耗时：
-  - deffire-gui-dev ：______ 字节，sha256 ______
-  - deffire-dev     ：______ 字节，sha256 ______
+  - FireFv0.<n> ：______ 字节，sha256 ______
+  - FireFv0.<n>-console     ：______ 字节，sha256 ______
   - TOOLCHAIN.txt   ：host_runtime = ______ ；built_local = ______
 - [板] verify-on-board.sh 退出码：____ ；结论：______ ；缺库：______
   - uname -m / -r：______ ；glibc：______ ；内存：______ ；X0：有/无
@@ -507,7 +507,7 @@ DISPLAY=:0 wmctrl -lG
 **2026-09-15 在 Fedora 上的回归结果**（供 Windows 侧对照"正常长什么样"）：
 
 - `./build.sh gui-armhf --rebuild` 退出码 **0**；环境镜像 12 步全部命中缓存，未联网。
-- 产出 `deffire-gui-dev` **约 0.4 MB**、`deffire-dev` **约 10 KB**；
+- 产出 `FireFv0.<n>` **约 0.4 MB**、`FireFv0.<n>-console` **约 10 KB**；
   连跑两次 sha256 **完全相同**（`6b2c14d2…`），即当前配置下构建可复现。
   （接入 libgpiod 之前是同源 403,804 字节 / `c73d670c…`，同样是两次一致。）
 - `file`：`ELF 32-bit LSB pie executable, ARM, EABI5`。

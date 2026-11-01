@@ -157,7 +157,7 @@ GPIOD / GPIOE / GPIOG: 全部被占用
 主循环彻底无关。频率默认 **2 kHz**，可在板上运行时试：
 
 ```bash
-FIRECONTROL_BUZZER_HZ=3000 DISPLAY=:0 ./deffire-gui-dev     # 100..8000，超范围会提示并回落
+FIRECONTROL_BUZZER_HZ=3000 DISPLAY=:0 ./FireFv0.<n>     # 100..8000，超范围会提示并回落
 ```
 
 试出这个蜂鸣器最响的频率后，把 `kOutBuzzerDefaultHz` 改成它（小无源蜂鸣器的谐振点通常在
@@ -176,7 +176,7 @@ FIRECONTROL_BUZZER_HZ=3000 DISPLAY=:0 ./deffire-gui-dev     # 100..8000，超范
 
 **一个副作用（知道就好，暂时不用管）**：`gpio_read_value()` 与 `write_File()` 在同一个
 翻译单元（`usetools.cpp`），链接器为 `write_File` 拉进这个 `.o` 时会把 gpiod 引用一起带上
-—— 于是**连不读 GPIO 的控制台程序 `deffire-dev` 也依赖 `libgpiod.so.2`**
+—— 于是**连不读 GPIO 的控制台程序 `FireFv0.<n>-console` 也依赖 `libgpiod.so.2`**
 （产物从约 5.6 KB 变成约 10 KB，具体以构建产物为准）。想去掉这个连带依赖，把 `gpio_read_value()` 挪到自己的
 `.cpp`（如 `src/library/gpio.cpp`）并登记进 `CMakeLists.txt` 即可，那样只有真正调用它的目标才链
 libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI 需要），收益只是让控制台
@@ -224,7 +224,7 @@ libgpiod。**现在没做** —— 板子无论如何都要装 `libgpiod2`（GUI
 - **还没做**报警判定/联动：报文进得来、五行填得上；但没有根据 `fire_alarm` /
   `smoke_alarm` / `temperature` 驱动本机蜂鸣器/LED（模块侧状态只显示），温度阈值也未定。
 - cJSON 静态编入产物：板上**不需要**装 `libcjson`/`libcjson-dev`，也不需要重建
-  armhf 工具链镜像；正常 `./build.sh gui-armhf` 后把 `build-armhf/deffire-gui-dev`
+  armhf 工具链镜像；正常 `./build.sh gui-armhf` 后把 `build-armhf/FireFv0.<n>`
    拷到板上即可（`Dockerfile.build-armhf` 已经 `COPY third_party/`）。
 
 ### 2.6 串口来源（2026-11）
