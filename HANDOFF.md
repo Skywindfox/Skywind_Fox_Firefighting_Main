@@ -11,8 +11,8 @@
 | 项 | 值 |
 |---|---|
 | 分支 | 只剩 `main`（本地/远端） |
-| 最新提交 | `555fbc2` `fix(gui): 请 WM 全屏, 解决底栏被标题栏/lxpanel 挡住`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
-| `main` = `origin/main` | `555fbc2`（已推送） |
+| 最新提交 | `c83fab2` `feat: 适配探测版报文 (信封 + data 嵌套), 删除 start/end 切帧`（内容提交；之后只同步本表的小提交不算，hash 以 `git log --oneline` 为准） |
+| `main` = `origin/main` | `c83fab2`（已推送） |
 | 工作区 | 干净；`build/`、`build-armhf/` 都在（本轮 native + armhf 都重建过） |
 | 远端 | `git@github.com:Skywindfox/Skywind_Fox_Firefighting_Main.git` |
 | 最近测试 | 本轮 `ctest` 4/4 通过；armhf 交叉编译通过（`build-armhf/deffire-gui-dev`，约 486 KB） |
@@ -20,6 +20,7 @@
 最近提交：
 
 ```text
+c83fab2  feat: 适配探测版报文 (信封 + data 嵌套), 删除 start/end 切帧
 555fbc2  fix(gui): 请 WM 全屏, 解决底栏被标题栏/lxpanel 挡住
 86dcdd5  feat: payload 改用模块固件字段 (fire_state/smoke_state/buzzer_state/led_state)
 2efe073  fix(gui): 已配置但没枚举到的串口设备不再从下拉里丢失
