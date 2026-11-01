@@ -61,6 +61,7 @@
 #include <unistd.h>
 
 #include "json_status.h"
+#include "sensor_names.h"
 #include "serial_source.h"
 #include "start.h"  // led_on / led_off (板载 sys-led)
 
@@ -130,6 +131,9 @@ constexpr uint32_t kSensorOk      = 0x4ADE80;  // 正常状态
 // 启动后这段时间内的点击一律忽略。窗口刚映射时可能收到启动瞬间遗留的
 // 杂散 ButtonPress, 不挡一下会"一启动就触发某个按钮"。
 constexpr uint32_t kIgnoreClicksMs = 400;
+
+// 温度告警阈值 (°C): >= 50 显示"警告"。单位按模块给的数值算, app 不做换算。
+constexpr double kTemperatureWarnC = 50.0;
 
 // 主循环最长休眠时间, 防止 LVGL 给出的间隔异常时睡死。
 constexpr uint32_t kMaxSleepMs = 10;
@@ -399,21 +403,21 @@ struct PageSpec {
 // 首页: 12 个信息源 (传感器模块) 的入口。
 //
 // **只预留位置, 不填内容** —— 具体接几个探测器、每个模块有哪些数据项现在都不知道,
-// 所以这里只有"信息源 1..12", 不预置"烟感/温度"这类猜出来的名字。
+// 所以这里只有"一号传感器 / 信息源 2..12", 不预置"烟感/温度"这类猜出来的名字。
 // 点进去的模块页显示"尚未配置数据项"; 等模块定义/数据接上后再往那一页填。
 constexpr ButtonSpec kHomeButtons[] = {
-    {"信息源 1", true, Action::OpenSensor, 0},
-    {"信息源 2", true, Action::OpenSensor, 1},
-    {"信息源 3", true, Action::OpenSensor, 2},
-    {"信息源 4", true, Action::OpenSensor, 3},
-    {"信息源 5", true, Action::OpenSensor, 4},
-    {"信息源 6", true, Action::OpenSensor, 5},
-    {"信息源 7", true, Action::OpenSensor, 6},
-    {"信息源 8", true, Action::OpenSensor, 7},
-    {"信息源 9", true, Action::OpenSensor, 8},
-    {"信息源 10", true, Action::OpenSensor, 9},
-    {"信息源 11", true, Action::OpenSensor, 10},
-    {"信息源 12", true, Action::OpenSensor, 11},
+    {firecontrol::kSensorNames[0], true, Action::OpenSensor, 0},
+    {firecontrol::kSensorNames[1], true, Action::OpenSensor, 1},
+    {firecontrol::kSensorNames[2], true, Action::OpenSensor, 2},
+    {firecontrol::kSensorNames[3], true, Action::OpenSensor, 3},
+    {firecontrol::kSensorNames[4], true, Action::OpenSensor, 4},
+    {firecontrol::kSensorNames[5], true, Action::OpenSensor, 5},
+    {firecontrol::kSensorNames[6], true, Action::OpenSensor, 6},
+    {firecontrol::kSensorNames[7], true, Action::OpenSensor, 7},
+    {firecontrol::kSensorNames[8], true, Action::OpenSensor, 8},
+    {firecontrol::kSensorNames[9], true, Action::OpenSensor, 9},
+    {firecontrol::kSensorNames[10], true, Action::OpenSensor, 10},
+    {firecontrol::kSensorNames[11], true, Action::OpenSensor, 11},
 };
 
 // 设置页: 现在所有的本地测试入口。原来放在首页的三个硬件调试页挪到这里;
@@ -590,13 +594,11 @@ uint32_t g_start_tick = 0;
 // (例如 --help 提前返回), 不能对没初始化过的 LVGL 调 lv_deinit()。
 bool g_lv_inited = false;
 
-// 当前页名。Page::Sensor 是一类页, 名字要带上具体的信息源编号。
+// 当前页名。Page::Sensor 是一类页, 用该路的显示名 (kSensorNames, 见 sensor_names.h)。
 const char *pageName()
 {
     if (g_page == Page::Sensor) {
-        static char name[32];
-        std::snprintf(name, sizeof name, "信息源 %d", g_sensor_index + 1);
-        return name;
+        return firecontrol::kSensorNames[g_sensor_index];
     }
     return kPages[static_cast<int>(g_page)].name;
 }
@@ -802,7 +804,7 @@ void loadSensorControls()
 
     const SensorConfig &cfg = g_sensor_cfg[g_sensor_index];
     if (g_sensor_title != nullptr) {
-        lv_label_set_text_fmt(g_sensor_title, "信息源 %d", g_sensor_index + 1);
+        lv_label_set_text(g_sensor_title, firecontrol::kSensorNames[g_sensor_index]);
     }
 
     // 设备清单可能变过 (插拔), 每次进页都重建一遍再回填选择。
@@ -859,10 +861,12 @@ void onApplySensorConfig(lv_event_t *e)
         configured ? cfg.baud : 0);
 
     if (configured) {
-        std::printf("信息源 %d 应用串口: %s @ %d (%s)\n", g_sensor_index + 1,
-                    cfg.device.c_str(), cfg.baud, rc == 0 ? "已打开" : "打开失败");
+        std::printf("%s 应用串口: %s @ %d (%s)\n",
+                    firecontrol::kSensorNames[g_sensor_index], cfg.device.c_str(),
+                    cfg.baud, rc == 0 ? "已打开" : "打开失败");
     } else {
-        std::printf("信息源 %d 应用串口: 未选择（已取消配置）\n", g_sensor_index + 1);
+        std::printf("%s 应用串口: 未选择（已取消配置）\n",
+                    firecontrol::kSensorNames[g_sensor_index]);
     }
     std::fflush(stdout);
 
@@ -934,6 +938,10 @@ void refreshJsonLabel()
         }
         lv_label_set_text(g_json_label, text.c_str());
         lv_obj_set_style_text_color(g_json_label, lv_color_hex(kColText), 0);
+    } else if (json.error == nullptr && !json.has_frame) {
+        // 还没收到任何报文 (例如默认串口刚配置、设备还没来): 这不是错误。
+        lv_label_set_text(g_json_label, "JSON  等待数据");
+        lv_obj_set_style_text_color(g_json_label, lv_color_hex(kColTextDim), 0);
     } else {
         lv_label_set_text_fmt(g_json_label, "JSON  未识别 (%s)",
                               json.error != nullptr ? json.error : "未知错误");
@@ -1037,8 +1045,10 @@ void refreshSensorData(bool force = false)
     if (json.has_temperature) {
         char temperature[32] = {};
         std::snprintf(temperature, sizeof temperature, "%.1f", json.temperature);
-        // 阈值还没定: 给数值 + 明确写"阈值待定", 不擅自判正常/异常。
-        setSensorRow(2, true, temperature, "阈值待定", kSensorAccent);
+        // 阈值: >= 50 °C 报"警告", 其余"正常" (数值原样显示, 不做换算)。
+        const bool over = json.temperature >= kTemperatureWarnC;
+        setSensorRow(2, true, temperature, over ? "警告" : "正常",
+                     over ? kSensorAccent : kSensorOk);
     } else {
         setSensorRow(2, false, "", "待接入", kSensorDim);
     }
@@ -1117,7 +1127,7 @@ void onAction(lv_event_t *e)
     // 用兜底串既消掉警告, 也真的兜住了那种情况 —— 而不是靠加 default 把
     // -Wswitch 那道"漏了 case"的防线拆掉。
     const char *outcome = "(未知动作)";
-    char outcome_buf[64] = {};  // OpenSensor 的 "进入信息源 N" 用
+    char outcome_buf[64] = {};  // OpenSensor 的 "进入 <名称>" 用
     bool page_switch = false;
 
     // 按动作派发。switch 里不写 default —— 以后往 Action 里加成员但忘了加
@@ -1169,7 +1179,8 @@ void onAction(lv_event_t *e)
         g_page = Page::Sensor;
         g_page_dirty = true;
         page_switch = true;
-        std::snprintf(outcome_buf, sizeof outcome_buf, "进入信息源 %d", idx + 1);
+        std::snprintf(outcome_buf, sizeof outcome_buf, "进入 %s",
+                      firecontrol::kSensorNames[idx]);
         outcome = outcome_buf;
         break;
     }
@@ -2220,7 +2231,7 @@ int gui_build()
     std::printf("\n交互:\n");
     std::printf("  点右上角【退出】   退出程序\n");
     std::printf("  点右上角【设置】   进设置页 (LED / 蜂鸣器 / 外部无源蜂鸣器调试入口)\n");
-    std::printf("  首页点【信息源 1..12】 进模块页, 页内【返回】回首页\n");
+    std::printf("  首页点【一号传感器】/【信息源 2..12】 进模块页, 页内【返回】回首页\n");
     std::printf("  设置页点【LED 调试】/【蜂鸣器 调试】/【外部无源蜂鸣器】 进对应调试页\n");
     std::printf("  调试页里点按钮     单独控制板载 LED / 蜂鸣器 / 外部无源蜂鸣器\n");
     std::printf("  按 q / Esc        退出程序 (每一页都一样)\n");

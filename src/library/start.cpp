@@ -11,6 +11,7 @@
 #include "greeting.h"
 #include "hardware_path.h"
 #include "json_status.h"
+#include "sensor_names.h"
 #include "serial_source.h"
 #include "usetools.h"
 
@@ -35,6 +36,12 @@
 // ---------------------------------------------------------------------------
 
 namespace {
+
+// 现场默认: 一号传感器 (信息源 1) 接在 /dev/ttySTM1 @ 115200。
+// 用户明确指定的接线 —— 启动就直接打开并开始收报文, 不用进界面点【应用设置】。
+// 想覆盖: FIRECONTROL_SERIAL_1="/dev/ttyS0:9600" (环境变量优先)。
+constexpr const char *kDefaultSerialDevice = "/dev/ttySTM1";
+constexpr int kDefaultSerialBaud = 115200;
 
 // 单调时钟微秒。status() 的节流和蜂鸣器线程的节拍都用它。
 uint64_t monotonic_us()
@@ -96,6 +103,13 @@ int device_init()
     //     FIRECONTROL_SERIAL_2="/dev/ttyS0:115200"
     // 哪一路都没配也没关系 —— 线程空转, 什么都不做。
     firecontrol::serial_apply_env();
+
+    // 没被环境变量覆盖时, 用现场默认值把一号传感器的串口直接打开。
+    // 设备暂时不在也没关系: serial_configure 会记下错误并每秒重连。
+    if (!firecontrol::serial_state(0).configured) {
+        firecontrol::serial_configure(0, kDefaultSerialDevice, kDefaultSerialBaud);
+    }
+
     firecontrol::serial_start();
 
     return 0;
@@ -240,11 +254,7 @@ int status()
             continue;
         }
 
-        if (i == 0) {
-            std::printf("--- JSON 状态 ---\n");
-        } else {
-            std::printf("--- 信息源 %d ---\n", i + 1);
-        }
+        std::printf("--- %s ---\n", firecontrol::kSensorNames[i]);
         if (json.has_frame) {
             std::printf("  完整报文: %s\n", json.frame.c_str());
         }

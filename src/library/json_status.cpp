@@ -407,7 +407,7 @@ int json_status_init()
         }
     }
 
-    // 信息源 1..11: 每路独立输入。现在还没接串口, 先用可选的
+    // 其余 11 路: 每路独立输入。现在还没接串口, 先用可选的
     // FIRECONTROL_JSON_FILE_<N> 文件做测试; 没设置就保持空状态。
     for (int i = 1; i < kInfoSourceCount; i++) {
         char env_name[40] = {};

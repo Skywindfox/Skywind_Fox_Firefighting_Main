@@ -1,6 +1,7 @@
 #include "serial_source.h"
 
 #include "json_status.h"
+#include "sensor_names.h"
 
 #include <algorithm>
 #include <atomic>
@@ -220,7 +221,7 @@ int serial_configure(int source_index, const char *device, int baud)
         slot.error.clear();
         slot.revision++;
         json_source_reset(source_index);
-        std::printf("信息源 %d 串口: 取消配置\n", source_index + 1);
+        std::printf("%s 串口: 取消配置\n", kSensorNames[source_index]);
         std::fflush(stdout);
         return 0;  // 取消不是失败
     }
@@ -238,10 +239,11 @@ int serial_configure(int source_index, const char *device, int baud)
     ensureThreadLocked();
 
     if (rc == 0) {
-        std::printf("信息源 %d 串口: %s @ %d 已打开\n", source_index + 1, device, baud);
+        std::printf("%s 串口: %s @ %d 已打开\n", kSensorNames[source_index], device,
+                    baud);
     } else {
-        std::printf("信息源 %d 串口: %s @ %d 打开失败 —— %s (每秒重试)\n",
-                    source_index + 1, device, baud, slot.error.c_str());
+        std::printf("%s 串口: %s @ %d 打开失败 —— %s (每秒重试)\n",
+                    kSensorNames[source_index], device, baud, slot.error.c_str());
     }
     std::fflush(stdout);
     return rc;
@@ -295,8 +297,8 @@ void runLoop()
                     (slot.last_attempt_ms == 0 ||
                      now - slot.last_attempt_ms >= kReconnectMs)) {
                     if (tryOpen(slot) == 0) {
-                        std::printf("信息源 %d 串口已重连: %s @ %d\n", i + 1,
-                                    slot.device.c_str(), slot.baud);
+                        std::printf("%s 串口已重连: %s @ %d\n",
+                                    kSensorNames[i], slot.device.c_str(), slot.baud);
                         std::fflush(stdout);
                         // 重连成功: 旧流的半帧作废。
                         json_source_reset(i);
@@ -348,8 +350,8 @@ void runLoop()
                         slot.error = error;
                         slot.revision++;
                     }
-                    std::printf("信息源 %d 串口断开: %s（每秒自动重连）\n", index + 1,
-                                slot.device.c_str());
+                    std::printf("%s 串口断开: %s（每秒自动重连）\n",
+                                kSensorNames[index], slot.device.c_str());
                     std::fflush(stdout);
                     json_source_reset(index);
                     failed = true;
